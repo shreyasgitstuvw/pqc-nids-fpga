@@ -1,7 +1,7 @@
 # pqc-nids-fpga
 
 **Inline FPGA-Based Post-Quantum Cryptographic Engine (ML-KEM) with Real-Time Network Telemetry and Threat Detection**
-Start here -> Environment Setup Guide.md
+Start here -> `docs/Environment Setup Guide.md`
 
 This README is the front door to the repository. If you're not sure where a file belongs, who owns it, or how to build/simulate something, start here before asking — the answer is almost certainly below or in one of the linked docs.
 
