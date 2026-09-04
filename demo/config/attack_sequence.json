@@ -1,0 +1,54 @@
+{
+  "_comment": "Ordered attack replay for attacker.py. gap_s is the pause BEFORE each step, so the narrative has breathing room while the judge reads the OLED.",
+  "sequence": [
+    {
+      "step": 1,
+      "attack": "port_scan",
+      "gap_s": 3.0,
+      "source": "cicids2017_subset/portscan.pcap",
+      "expect_reason": "SCAN",
+      "say": "Attacker sweeps ports. Count-Min Sketch sees distinct-target spread and flags SCAN."
+    },
+    {
+      "step": 2,
+      "attack": "syn_flood",
+      "gap_s": 4.0,
+      "source": "cicids2017_subset/synflood.pcap",
+      "expect_reason": "FLOOD",
+      "say": "Volumetric flood. Same sketch, different signature -- rate rather than spread."
+    },
+    {
+      "step": 3,
+      "attack": "known_signature",
+      "gap_s": 4.0,
+      "source": "cicids2017_subset/signature.pcap",
+      "expect_reason": "SIGNATURE",
+      "say": "Payload matches a loaded signature. CAM resolves it in one clock cycle."
+    },
+    {
+      "step": 4,
+      "attack": "tampered_payload",
+      "gap_s": 4.0,
+      "source": "generated",
+      "expect_reason": "BAD_TAG",
+      "say": "One byte flipped in an established session. Poly1305 rejects it."
+    },
+    {
+      "step": 5,
+      "attack": "malformed_key",
+      "gap_s": 4.0,
+      "source": "generated",
+      "expect_reason": "HANDSHAKE_KEY_INVALID",
+      "say": "Structurally invalid encapsulation key -- a coefficient above q. Rejected before any math runs."
+    },
+    {
+      "step": 6,
+      "attack": "tampered_ciphertext",
+      "gap_s": 5.0,
+      "source": "generated",
+      "expect_reason": "BAD_TAG",
+      "expect_handshake_verdict": null,
+      "say": "The important one. A tampered handshake ciphertext produces NO verdict -- implicit rejection is silent by design. The session establishes normally and the failure only surfaces one packet later, as BAD_TAG. That silence is the Fujisaki-Okamoto property working."
+    }
+  ]
+}

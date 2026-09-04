@@ -1,0 +1,12 @@
+# Python dependencies for the model, its self-tests, and the cocotb harness.
+# The model itself has NO third-party dependency at runtime -- pycryptodome is
+# used only as an independent oracle inside model/sha3.py's __main__ self-test,
+# so a Keccak bug can't hide behind our own implementation agreeing with itself.
+pycryptodome==3.20.0
+
+# RTL simulation harness (used once sim/cocotb/test_*.py exist).
+cocotb==1.9.2
+pytest==8.3.3
+
+# Lint: real-error rules only (undefined names, syntax) -- style is not gated.
+flake8==7.1.1

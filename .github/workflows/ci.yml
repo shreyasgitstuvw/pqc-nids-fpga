@@ -1,0 +1,138 @@
+name: CI
+
+# Every push and PR. The Python model is the oracle for all RTL, so it is
+# gated hardest: if model/mlkem stops matching the FIPS 203 vectors, nothing
+# downstream is trustworthy and the build fails here rather than in Phase VII.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------- lint
+  lint:
+    name: Lint (Python real-errors)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      # E9 syntax errors, F63/F7 logic errors, F82 undefined names.
+      # Deliberately not a style gate -- these are the rules that catch bugs.
+      - name: flake8
+        run: flake8 model/ demo/ --count --select=E9,F63,F7,F82 --show-source --statistics
+
+  # -------------------------------------------------------- python model
+  model:
+    name: Python model self-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+
+      - name: Keccak / SHA3 / SHAKE vs pycryptodome
+        run: python model/sha3.py
+
+      - name: NTT forward-inverse identity
+        run: python model/mlkem/ntt.py
+
+      - name: CBD sampler distribution
+        run: python model/mlkem/cbd.py
+
+      - name: K-PKE round trip
+        run: python model/mlkem/pke.py
+
+      - name: ML-KEM-512 round trip + implicit rejection
+        run: python model/mlkem/kem.py
+
+  # ----------------------------------------------------------- HARD GATE
+  kat:
+    name: FIPS 203 KAT gate
+    runs-on: ubuntu-latest
+    needs: model
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+
+      # Phase V exit criterion, per the execution plan: zero unexplained
+      # mismatches. kat_test.py exits non-zero on any failure.
+      - name: ML-KEM-512 known-answer vectors
+        run: |
+          python model/mlkem/kat_test.py | tee kat.out
+          echo '### FIPS 203 KAT' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -8 kat.out >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Operation counts (for the §6.3 timing table)
+        run: python model/mlkem/opcount.py
+
+  # -------------------------------------------------------- verilog lint
+  # Warnings are errors, per synopsis §7.2. Skips cleanly while rtl/ holds
+  # no modules yet, so this job goes green today and starts gating the day
+  # someone commits their first .v file.
+  rtl:
+    name: Verilog lint (warnings = errors)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Verilator
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq verilator
+      - name: Lint every module
+        run: |
+          shopt -s globstar nullglob
+          files=(rtl/**/*.v)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No .v files yet — nothing to lint."
+            echo '_No RTL modules committed yet._' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "Linting ${#files[@]} module(s)…"
+          status=0
+          for f in "${files[@]}"; do
+            echo "── $f"
+            verilator --lint-only -Wall -Irtl/control "$f" || status=1
+          done
+          exit $status
+
+  # -------------------------------------------------------------- cocotb
+  # Same shape: green while sim/cocotb/ is empty, gating once it isn't.
+  sim:
+    name: cocotb testbenches
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Discover testbenches
+        id: find
+        run: |
+          n=$(find sim/cocotb -name 'test_*.py' | wc -l)
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+          [ "$n" -eq 0 ] && echo "No cocotb testbenches yet." || true
+      - name: Install simulator
+        if: steps.find.outputs.count != '0'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq iverilog
+      - run: pip install -r requirements-dev.txt
+        if: steps.find.outputs.count != '0'
+      - name: Run
+        if: steps.find.outputs.count != '0'
+        run: make -C sim

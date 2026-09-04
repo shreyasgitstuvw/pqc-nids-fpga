@@ -18,17 +18,19 @@ The phase plan puts us in **Phase II (Sep W1–2)**. Repo state says otherwise:
 
 | | Plan says | Repo says |
 |---|---|---|
-| Phase I | done | **not done** — contract is DRAFT, no CI, no `model/pipeline.py` |
+| Phase I | done | **contract still DRAFT** — CI and `pipeline.py` now landed |
 | Phase II | due now | not started — no `parser.v` |
 | Phase III | Sep W3–4 | not started |
-| Phase IV–V | Oct–Nov | **Member C's Python oracle complete, KAT 80/80** |
+| Phase IV–V | Oct–Nov | **Member C's Python oracle merged to main, KAT 80/80** |
+| Phase IX | Dec W3 | `demo/` skeleton landed early — config, display and checklist run today |
 
-Only Member C has pushed anything. `rtl/`, `sim/cocotb/`, `scripts/`, `constraints/`,
-`test-network/` and `.github/workflows/` contain nothing but `.gitkeep`. `demo/` doesn't exist.
+`rtl/`, `sim/cocotb/`, `scripts/`, `constraints/` and `test-network/` still contain nothing
+but `.gitkeep`. Member C's lane is merged into `main` (PR #1).
 
-**The single highest-leverage item in the whole repo right now is `A1` — freezing the interface
-contract.** Eleven tasks across B, C and D are waiting on it, directly or transitively. It has been
-the blocker since Phase I and it is still the blocker.
+**`A1` — freezing the interface contract — is now the ONLY thing standing between this project and
+a closed Phase I.** Eleven tasks across B, C and D wait on it, directly or transitively. CI is green,
+the pipeline stub is in, the demo skeleton exists. The contract is the last Phase I item, and it has
+been the blocker since August.
 
 **Member C is roughly six weeks ahead of the calendar and is the only track not blocked by anything.**
 That is the opposite of the plan's assumption (§5: "Person C's output is the critical path"). The
@@ -51,16 +53,18 @@ Nothing is stopping any of these. If you own one, there is no reason it isn't mo
 | `B3` | B | CMS verdict latency → A |
 | `B5` | B | CMS sizing: k, w, (ε,δ) against ≈11.5 of 140 BRAMs |
 | `B10` | B | Curate labeled `cicids2017_subset/` |
-| `C7` | C | Push + merge `member-c/python-oracle` |
+| `C8` | C | `keccak_f1600.v` — first RTL of the crypto lane |
+| `C10` | C | `ntt_core.v` / `butterfly.v` / `modmul.v` |
 | `D3` | D | Check port numbers against test traffic, agree with A |
 | `D4` | D | `chacha20.v` + RFC 8439 vectors |
 | `D6` | D | `model/chacha_poly.py` |
 | `D7` | D | `drop_engine.v` stub — **unblocks B's testbenches** |
-| `P1` | — | CI: lint → pytest → cocotb → KAT |
-| `P2` | — | `model/pipeline.py` stub |
-| `P3` | — | `demo/` skeleton |
 
-**D7 and P2 are worth doing first among these** — each unblocks another person, and both are small.
+**`D7` is the highest-value one left here** — the drop-engine stub is an afternoon's work and it
+unblocks `B12`. `C8`/`C10` are now unblocked too, since `C7` merged.
+
+Landed since this board was written: `P1` (CI), `P2` (`model/pipeline.py`), `P3` (`demo/` skeleton),
+`C7` (merge).
 
 ---
 
@@ -68,10 +72,10 @@ Nothing is stopping any of these. If you own one, there is no reason it isn't mo
 
 Nobody's guide claims these, which is why none of them exist. Assign them.
 
-- [ ] `P1` Stand up CI — lint → Python tests → cocotb → KAT, warnings as errors · `.github/workflows/ci.yml` · **Phase I exit**
-- [ ] `P2` `model/pipeline.py` pass-through stub so cocotb has something to import
-- [ ] `P3` Create `demo/` skeleton with empty files and `demo_config.py` stubs
-- [ ] `P4` Declare Phase I genuinely closed · **Phase I exit** · ⛔ waiting on `P1`, `A1`
+- [x] `P1` Stand up CI — lint → Python tests → cocotb → KAT, warnings as errors · `.github/workflows/ci.yml` · **Phase I exit**
+- [x] `P2` `model/pipeline.py` pass-through stub so cocotb has something to import
+- [x] `P3` Create `demo/` skeleton with empty files and `demo_config.py` stubs
+- [ ] `P4` Declare Phase I genuinely closed · **Phase I exit** · ⛔ waiting on `A1` _(CI is up; the contract is the only thing left)_
 
 ---
 
@@ -135,10 +139,10 @@ port is invisible to you. One-line confirmation, but it needs to be explicit.
 - [x] `C4` Operation counts + cycle estimates for the §6.3 table · `python model/mlkem/opcount.py`
 - [x] `C5` Interface response to Member A
 - [x] `C6` Contract freeze package + draft `rtl/control/reason_codes.vh`
-- [ ] `C7` Push and merge `member-c/python-oracle` into `main`
-- [ ] `C8` `keccak_f1600.v` + `shake_wrapper.v` — decide unrolled vs iterative rounds · ⛔ waiting on `C7`
+- [x] `C7` Push and merge `member-c/python-oracle` into `main` — PR #1 merged, branch deleted
+- [ ] `C8` `keccak_f1600.v` + `shake_wrapper.v` — decide unrolled vs iterative rounds 
 - [ ] `C9` `test_keccak.py` vs `model/sha3.py`, then FIPS 202 KAT through RTL · **Phase IV exit** · ⛔ waiting on `C8`
-- [ ] `C10` `ntt_core.v` / `butterfly.v` / `modmul.v` within the ≈8 DSP budget · ⛔ waiting on `C7`
+- [ ] `C10` `ntt_core.v` / `butterfly.v` / `modmul.v` within the ≈8 DSP budget 
 - [ ] `C11` `test_ntt.py` — hundreds of random polys, forward∘inverse = identity · **Phase IV exit** · ⛔ waiting on `C10`
 - [ ] `C12` `cbd_sampler.v`, verified incl. seed handling · **Phase IV exit** · ⛔ waiting on `C9`
 - [ ] `C13` `compress.v` / `decompress.v` · ⛔ waiting on `C10`
