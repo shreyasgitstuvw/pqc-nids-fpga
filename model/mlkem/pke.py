@@ -101,13 +101,25 @@ def sample_ntt(seed_bytes: bytes) -> list:
     """seed_bytes: 34 bytes (32-byte seed + 2 index bytes). Returns 256
     uniformly distributed coefficients in [0, Q)."""
     a_hat = []
-    squeezes_done = 0
-    while len(a_hat) < 256:
-        full = shake128(seed_bytes, (squeezes_done + 1) * 3)
-        chunk = full[squeezes_done * 3: (squeezes_done + 1) * 3]
-        squeezes_done += 1
 
-        c0, c1, c2 = chunk[0], chunk[1], chunk[2]
+    # Squeeze the XOF once into a buffer and walk it, rather than re-running
+    # shake128 from scratch for every 3-byte chunk. The byte STREAM is
+    # identical either way -- this only changes how many times we recompute
+    # it. 672 bytes = 4 sponge blocks at rate 168, comfortably above the ~475
+    # bytes rejection sampling needs on average; the doubling path below is a
+    # rare fallback, not the common case.
+    #
+    # This matters beyond Python speed: RTL streams the XOF one rate-block at
+    # a time, so the permutation count measured here is what the hardware
+    # budget is estimated from. The naive re-squeeze inflated it by ~80x.
+    buf = shake128(seed_bytes, 168 * 4)
+    pos = 0
+
+    while len(a_hat) < 256:
+        if pos + 3 > len(buf):
+            buf = shake128(seed_bytes, len(buf) * 2)   # extend, same stream
+        c0, c1, c2 = buf[pos], buf[pos + 1], buf[pos + 2]
+        pos += 3
         d1 = c0 + 256 * (c1 % 16)
         d2 = (c1 // 16) + 16 * c2
 
