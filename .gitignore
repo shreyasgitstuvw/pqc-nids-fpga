@@ -1,0 +1,38 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- IDE ---
+.idea/
+.vscode/
+*.swp
+
+# --- Vivado / Vitis build artifacts ---
+*.jou
+*.log
+*.str
+.Xil/
+vivado*.backup.jou
+vivado*.backup.log
+*.cache/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.gen/
+*.xpr.bak
+
+# --- Simulation ---
+*.vcd
+*.fst
+*.ghw
+sim_build/
+results.xml
+
+# --- OS ---
+.DS_Store
+Thumbs.db
