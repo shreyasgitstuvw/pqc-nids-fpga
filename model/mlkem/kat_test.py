@@ -25,13 +25,14 @@ implicit-rejection key Kbar = J(z||c), so this group proves the FO transform
 is byte-exact rather than merely "returns something different" -- which is
 all the round-trip self-test could establish.
 
-Not exercised
--------------
-  decapsulationKeyCheck / encapsulationKeyCheck groups test input validation
-  (FIPS 203 sec 7.2/7.3): rejecting a dk whose embedded H(ek) does not match,
-  and rejecting an ek whose coefficients are non-canonical mod q. Those checks
-  are not implemented in kem.py, so these groups are reported SKIP rather than
-  silently counted as passing.
+  encapsulationKeyCheck  ek     -> bool     tests check_ek  (sec 7.2)
+  decapsulationKeyCheck  dk     -> bool     tests check_dk  (sec 7.3)
+
+The two key-check groups assert a boolean rather than a value: given a key,
+does the implementation accept it? Half the cases carry deliberately corrupted
+keys -- an ek with coefficients in 3329..4095 ("noisy linear system values too
+large"), or a dk whose embedded H(ek) was altered ("modified H") -- and the
+implementation is required to reject exactly those and no others.
 """
 
 import json
@@ -42,7 +43,8 @@ repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
-from model.mlkem.kem import keygen_internal, encaps_internal, decaps_internal
+from model.mlkem.kem import (keygen_internal, encaps_internal, decaps_internal,
+                            check_ek, check_dk)
 
 PARAM_SET = "ML-KEM-512"
 VECTOR_DIR = os.path.join(repo_root, "sim", "vectors", "fips203_kat")
@@ -135,11 +137,33 @@ def run_encap_decap(path):
                 record(not diff, t["tcId"], "decapsulation", detail)
             print(f"   {n} cases run")
 
+        elif fn in ("encapsulationKeyCheck", "decapsulationKeyCheck"):
+            # These groups assert a boolean: does the implementation ACCEPT
+            # this key? Expected answer is t["testPassed"]. A case with
+            # testPassed=False carries a deliberately corrupted key and the
+            # implementation is required to reject it.
+            check = check_ek if fn == "encapsulationKeyCheck" else check_dk
+            field = "ek" if fn == "encapsulationKeyCheck" else "dk"
+            reasons = {}
+            for t in g["tests"]:
+                r = t.get("reason", "?")
+                reasons[r] = reasons.get(r, 0) + 1
+            print(f"\n-- {fn}  tgId={g['tgId']}  {g['testType']}  ({n} cases)")
+            for r, cnt in sorted(reasons.items()):
+                print(f"     {cnt:2d} x {r}")
+            for t in g["tests"]:
+                want = t["testPassed"]
+                got = check(hx(t[field]))
+                detail = ("" if got == want else
+                          f"[{t.get('reason','?')}] check_{field} returned "
+                          f"{got}, expected {want}")
+                record(got == want, t["tcId"], fn, detail)
+            print(f"   {n} cases run")
+
         else:
             global skipped
             skipped += n
-            print(f"\n-- {fn}  tgId={g['tgId']}  ({n} cases)  SKIP"
-                  f"  -- input validation (FIPS 203 sec 7.2/7.3) not implemented")
+            print(f"\n-- {fn}  tgId={g['tgId']}  ({n} cases)  SKIP -- unhandled")
 
 
 if __name__ == "__main__":
@@ -162,7 +186,7 @@ if __name__ == "__main__":
 
     print(f"passed  {passed}")
     print(f"failed  {failed}")
-    print(f"skipped {skipped}  (input-validation groups, not implemented)")
+    print(f"skipped {skipped}")
     print("=" * 68)
 
     if failed:
