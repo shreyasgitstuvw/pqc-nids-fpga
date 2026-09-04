@@ -1,0 +1,13 @@
+# Normalize all text files to LF in the repository.
+# Without this, Windows editors (PyCharm) save CRLF and every file shows as
+# fully rewritten in git diff, making cross-member review impossible.
+* text=auto eol=lf
+
+# Explicitly binary — never touch these.
+*.png  binary
+*.jpg  binary
+*.pdf  binary
+*.bit  binary
+*.bin  binary
+*.mcs  binary
+*.pcap binary
