@@ -1,9 +1,21 @@
 # pqc-nids-fpga
 
 **Inline FPGA-Based Post-Quantum Cryptographic Engine (ML-KEM) with Real-Time Network Telemetry and Threat Detection**
+
 Start here -> `docs/Environment Setup Guide.md`
 
+
+Target hardware: ZedBoard (Xilinx Zynq-7000 XC7Z020)
+
+
 This README is the front door to the repository. If you're not sure where a file belongs, who owns it, or how to build/simulate something, start here before asking — the answer is almost certainly below or in one of the linked docs.
+
+---
+
+> ## 🚀 New to the repo? Start here first.
+> **`docs/Environment-Setup-Guide.md`** — install every tool you need (Git, Python, Icarus Verilog, VS Code extensions), with and without Vivado, before anything else. The commands in this README assume that guide has been completed. If `iverilog`, `python`, or `make` give you a "command not found" error, go back to that guide — don't try to debug repo commands on an unconfigured machine.
+
+---
 
 ---
 
@@ -17,6 +29,7 @@ If you haven't read the project synopsis or the architecture/execution plan, rea
 
 | You need... | Go to |
 |---|---|
+| **Install tools before anything else** | `docs/Environment-Setup-Guide.md` — do this first, on day one, before cloning |
 | The big picture / why the project is shaped this way | `Major_Project_Synopsis_PQC_NIDS.pdf` |
 | Full repo architecture and phase-by-phase execution plan | `docs/PQC-NIDS-Architecture-and-Execution-Plan.md` |
 | Your individual task list, build order, and done-criteria | `docs/members/Member-{A,B,C,D}-*.md` |
@@ -26,6 +39,10 @@ If you haven't read the project synopsis or the architecture/execution plan, rea
 | How to build a bitstream | §6 below, `scripts/build_bitstream.tcl` |
 | How to run simulations | §5 below, `sim/Makefile` |
 | Git workflow, branch/PR rules | §7 below |
+| **How to run the demo on the day** | `demo/README_DEMO.md` — read this before touching any demo script |
+| **Pre-demo go/no-go check** | `python demo/verify/pre_demo_checklist.py` |
+| **Reset between demo runs** | `demo/run/demo_reset.sh` — recovers to clean state in under 30 seconds |
+| **Where live timing numbers come from** | `demo/capture/timing_capture.py` → feeds §6.3 table |
 
 > Place the four member guides and four theory guides in `docs/members/`, and the interface/architecture docs directly under `docs/`, so this table's paths resolve. If your copies currently live elsewhere, move them there before the next commit — a README with dead links is worse than no README.
 
@@ -97,6 +114,25 @@ pqc-nids-fpga/
 │   ├── attacker.py
 │   └── uart_link.py
 │
+├── demo/                              OWNER: shared — Phase IX, treat like scripts/ (PR any change)
+│   ├── run/
+│   │   ├── demo_start.sh             opens all terminals, starts send.py + recv.py automatically
+│   │   ├── demo_reset.sh             kills scripts, resets FPGA session state, clears OLED
+│   │   └── demo_load_bitstream.tcl   burns build/pqc_nids.bit to board via JTAG before demo
+│   ├── config/
+│   │   ├── demo_config.py            single source of truth: COM ports, baud rate, packet count
+│   │   └── attack_sequence.json      ordered attack types + timing gaps for attacker.py
+│   ├── display/
+│   │   ├── oled_layout.py            Python-side OLED content definition — MUST stay in sync with oled_driver.v
+│   │   └── led_map.py                reason-code → LED index mapping — MUST stay in sync with led_driver.v
+│   ├── verify/
+│   │   ├── pre_demo_checklist.py     automated go/no-go before judge arrives — run this first
+│   │   └── smoke_test.py             10 clean + 5 attack packets; exits 0 = ready, exits 1 = broken
+│   ├── capture/
+│   │   ├── session_log.py            timestamps every event to a .log file for report evidence
+│   │   └── timing_capture.py         reads FPGA hardware timestamps → formats §6.3 table numbers
+│   └── README_DEMO.md                judge-facing step-by-step runbook — any team member can run the demo
+│
 ├── constraints/                       OWNER: whoever runs Phase VII timing closure — likely Member A (owns clock/UART pins) + Member C (owns the timing-critical NTT path)
 │   ├── zedboard_pmod.xdc
 │   └── timing.xdc
@@ -108,6 +144,11 @@ pqc-nids-fpga/
 │
 ├── docs/                              OWNER: whoever wrote the doc; interface_contract.md is Member A's but requires
 │   │                                   sign-off from all four before any change is merged (see §8)
+│   ├── Environment-Setup-Guide.md     OWNER: shared — update when any tool version or install step changes
+│   ├── PQC-NIDS-Architecture-and-Execution-Plan.md
+│   ├── Master-Interface-Document.md
+│   ├── interface_contract.md
+│   ├── Interface-Contract-Design-Rationale.md
 │   └── members/                       the four per-person task guides and theory guides
 │
 └── .github/workflows/
@@ -123,12 +164,18 @@ pqc-nids-fpga/
 | Add a new reason code | `rtl/control/reason_codes.vh` — ask Member A, don't add it unilaterally (it's a shared enum) |
 | Fix a wrong NTT butterfly stage | `rtl/crypto/ntt/butterfly.v` and re-check against `model/mlkem/ntt.py` |
 | Change the ML-KEM parameter set | `rtl/crypto/kem/mlkem_top.v` — this is a big change, flag it to everyone, it likely breaks the FIPS 203 KAT gate temporarily |
-| Add a new attack signature | `rtl/detect/cam_matcher.v`'s loaded table + `sim/vectors/cicids2017_subset/` |
+| Add a new attack signature | `rtl/detect/cam_matcher.v`'s loaded table + `sim/vectors/cicids2017_subset/` + `demo/config/attack_sequence.json` |
 | Retune the Count-Min Sketch size | `rtl/detect/count_min_sketch.v` — redo the (epsilon, delta) math in Member B's guide before changing constants |
 | Change the ChaCha/Poly1305 composition order | Don't, unless you've re-read RFC 8439 — this is specified, not a style choice |
 | Change how verdicts get merged / prioritized on simultaneous failure | `rtl/control/drop_engine.v` — this affects Member B's and Member D's reason-code semantics, coordinate before changing |
 | Fix a Vivado timing violation | `constraints/timing.xdc` first; if that's not enough, it's a pipelining problem in whichever module is on the critical path — check the timing report to find out which |
 | Add a CI check | `.github/workflows/ci.yml` — shared file, PR it like any other |
+| Change what the OLED displays | `rtl/io/oled_driver.v` **and** `demo/display/oled_layout.py` — always both, they must stay in sync |
+| Change what the LEDs indicate | `rtl/io/led_driver.v` **and** `demo/display/led_map.py` — always both |
+| Change the demo's COM port or baud rate | `demo/config/demo_config.py` only — all scripts read from here, don't hardcode elsewhere |
+| Add or reorder an attack in the demo sequence | `demo/config/attack_sequence.json` + confirm with Member B that the new attack type is in `sim/vectors/cicids2017_subset/` |
+| Verify the board is ready before the judge arrives | `python demo/verify/pre_demo_checklist.py` — reads `demo_config.py`, pings FPGA, checks all deps |
+| Reset the demo between runs | `demo/run/demo_reset.sh` — this is the file, not a manual power cycle |
 
 ## 5. Running simulations
 
