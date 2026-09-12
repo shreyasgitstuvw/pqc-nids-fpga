@@ -53,7 +53,9 @@ always a command that answers it. Run it.
 ## 3. Guardrails — violating any of these is a serious failure
 
 **Never modify a test vector, a KAT file, or an assertion threshold to make a
-test pass.** If a test fails, the code is wrong. Files under `sim/vectors/`
+test pass.** This is now enforced at the permission layer — writes under
+`sim/vectors/`, `model/mlkem/` and `model/sha3.py` are denied outright — but the
+rule stands regardless of whether the mechanism is in place on a given machine. If a test fails, the code is wrong. Files under `sim/vectors/`
 are external ground truth from NIST and the RFCs; they are read-only. Changing
 them to get green is the one action that destroys the entire premise of this
 project, and it is not recoverable by review because the build still looks fine.
@@ -68,6 +70,8 @@ files even if you can see an obvious bug — report it instead. Four people and
 autonomous agents editing the same tree is how a shared repo gets corrupted.
 
 **Never commit to `main`.** Work on `member-<x>/<topic>` branches and open a PR.
+Pushes targeting `main` and all force-pushes are denied at the permission layer.
+See the `git` skill for the full workflow.
 
 **Never weaken CI.** Do not remove a job, relax `-Wall`, add `continue-on-error`,
 or skip a test to get a green run.

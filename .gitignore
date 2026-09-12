@@ -36,3 +36,6 @@ results.xml
 # --- OS ---
 .DS_Store
 Thumbs.db
+
+# local experiments, not part of the project
+_local/

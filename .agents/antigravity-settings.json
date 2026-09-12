@@ -1,0 +1,72 @@
+{
+  "_comment": "Copy this to ~/.gemini/antigravity-cli/settings.json on every team machine. Windows: C:\\Users\\<you>\\.gemini\\antigravity-cli\\settings.json. Kept in the repo so all four of us run the same rules. Precedence is Deny > Ask > Allow.",
+
+  "toolPermission": "proceed-in-sandbox",
+  "enableTerminalSandbox": true,
+
+  "permissions": {
+    "deny": [
+      "write_file(sim/vectors/)",
+      "write_file(model/mlkem/)",
+      "write_file(model/sha3.py)",
+      "write_file(.git/)",
+
+      "command(regex:git\\s+push\\s+.*(--force|--force-with-lease|-f)\\b)",
+      "command(regex:git\\s+push\\s+\\S+\\s+main\\b)",
+      "command(regex:git\\s+push\\s+origin\\s+HEAD:main)",
+      "command(regex:git\\s+reset\\s+--hard)",
+      "command(regex:git\\s+clean\\s+-[a-zA-Z]*f)",
+      "command(regex:git\\s+branch\\s+-D)",
+      "command(regex:git\\s+filter-branch)",
+      "command(regex:git\\s+config\\s+--global)",
+      "command(regex:git\\s+remote\\s+(set-url|remove|rm))",
+      "command(regex:gh\\s+repo\\s+delete)",
+      "command(regex:rm\\s+-rf)",
+      "command(sudo)"
+    ],
+
+    "ask": [
+      "command(git add)",
+      "command(git commit)",
+      "command(git push)",
+      "command(git pull)",
+      "command(git merge)",
+      "command(git rebase)",
+      "command(git checkout)",
+      "command(git switch)",
+      "command(git restore)",
+      "command(git stash)",
+      "command(git revert)",
+      "command(git cherry-pick)",
+      "command(gh pr create)",
+      "command(gh pr merge)"
+    ],
+
+    "allow": [
+      "command(git status)",
+      "command(git log)",
+      "command(git diff)",
+      "command(git show)",
+      "command(git fetch)",
+      "command(git branch)",
+      "command(git remote)",
+      "command(git rev-parse)",
+      "command(git rev-list)",
+      "command(git ls-files)",
+      "command(git blame)",
+      "command(git shortlog)",
+      "command(git describe)",
+      "command(git merge-base)",
+      "command(gh pr list)",
+      "command(gh pr view)",
+      "command(gh pr diff)",
+      "command(gh repo view)",
+      "command(gh run list)",
+      "command(gh run view)",
+      "command(python)",
+      "command(verilator)",
+      "command(make)",
+      "command(pytest)"
+    ]
+  }
+}

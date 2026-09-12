@@ -182,6 +182,7 @@ and it is the whole discipline.
 |---|---|
 | Know what to work on | `/standup <your letter>` |
 | Build a hardware module | `/newmodule <path>` |
+| See what teammates pushed | `/sync` |
 | Check if things actually pass | `/checkgate` |
 | Understand a file you didn't write | `@explain` |
 | Work in your own lane | `@ingress` `@detect` `@crypto` `@control` |

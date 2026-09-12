@@ -236,6 +236,7 @@ A few files are structurally shared and don't belong to one person. Handle each 
 The team uses Google Antigravity.
 
 - **[docs/AI-WORKFLOW-GUIDE.md](docs/AI-WORKFLOW-GUIDE.md)** — read once: how the setup works, a worked session end to end.
-- **[docs/AI-WORKFLOW-QUICKSTART.md](docs/AI-WORKFLOW-QUICKSTART.md)** — keep open: setup and the three commands.
+- **[docs/AI-WORKFLOW-QUICKSTART.md](docs/AI-WORKFLOW-QUICKSTART.md)** — keep open: setup and the commands.
+- **[docs/AI-GIT-SETUP.md](docs/AI-GIT-SETUP.md)** — one-time: let agents use git safely (no MCP needed).
 
 Agent rules load automatically from [AGENTS.md](AGENTS.md) and `.agents/`.

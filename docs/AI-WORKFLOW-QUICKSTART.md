@@ -72,7 +72,7 @@ You should see the model self-tests pass and `kat_test.py` print 80/80.
 
 ---
 
-## The three commands you actually need
+## The commands you actually need
 
 ### `/standup C`
 
@@ -95,6 +95,15 @@ reports.
   thing you will be asked to defend in a viva, so read it properly.
 - **After the full test run, before opening a PR.** You see the results and
   decide.
+
+### `/sync`
+
+Fetches from GitHub and tells you what teammates pushed, whether a shared file
+moved under you (interface contract, `reason_codes.vh`, `model/`), and whether
+CI is green. Never merges — it reports, you decide.
+
+Run it at the start of every session. One-time git setup:
+[AI-GIT-SETUP.md](AI-GIT-SETUP.md).
 
 ### `/checkgate`
 
