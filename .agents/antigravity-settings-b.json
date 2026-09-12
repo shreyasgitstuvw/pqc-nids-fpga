@@ -1,5 +1,5 @@
 {
-  "_comment": "Do NOT copy this file directly. This is the shared template the four per-member files (antigravity-settings-a.json / -b.json / -c.json / -d.json) are generated from. Each member copies their OWN lettered file to ~/.gemini/antigravity-cli/settings.json \u2014 see docs/AI-GIT-SETUP.md. The lettered files are identical to this one except each adds a deny rule blocking git push to the other three members' branch namespaces.",
+  "_comment": "Member B's copy. Copy this to ~/.gemini/antigravity-cli/settings.json on Member B's machine only \u2014 each member gets their own lettered file (antigravity-settings-b.json), not the generic one. This adds a hard block on pushing to any other member's branch namespace (member-a|c|d/*), on top of the shared rules everyone runs. Precedence is Deny > Ask > Allow.",
   "toolPermission": "proceed-in-sandbox",
   "enableTerminalSandbox": true,
   "permissions": {
@@ -11,6 +11,7 @@
       "command(regex:git\\s+push\\s+.*(--force|--force-with-lease|-f)\\b)",
       "command(regex:git\\s+push\\s+\\S+\\s+main\\b)",
       "command(regex:git\\s+push\\s+origin\\s+HEAD:main)",
+      "command(regex:git\\s+push\\b.*\\bmember-(a|c|d)/)",
       "command(regex:git\\s+reset\\s+--hard)",
       "command(regex:git\\s+clean\\s+-[a-zA-Z]*f)",
       "command(regex:git\\s+branch\\s+-D)",

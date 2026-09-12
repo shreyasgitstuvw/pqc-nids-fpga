@@ -54,14 +54,24 @@ Windows Credential Manager; you will not be asked again.
 
 ## Step 2 — install the permission rules
 
-The team's rules live in the repo at `.agents/antigravity-settings.json` so all
-four of us run the same thing. Copy it into place:
+The team's rules live in the repo at `.agents/`, but **each member copies a
+different file** — `antigravity-settings-<your letter>.json`, not the generic
+one. All four files share the same base rules; the only difference is that
+each one adds a hard block on pushing to the *other three* members' branch
+namespaces, so a mistaken `git push origin member-b/...` from Member A's
+machine is refused at the permission layer, not just frowned upon.
+
+Member A, on Member A's machine:
 
 ```powershell
 $dest = "$env:USERPROFILE\.gemini\antigravity-cli"
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
-Copy-Item .agents\antigravity-settings.json "$dest\settings.json" -Force
+Copy-Item .agents\antigravity-settings-a.json "$dest\settings.json" -Force
 ```
+
+Member B copies `antigravity-settings-b.json`, Member C copies
+`antigravity-settings-c.json`, Member D copies `antigravity-settings-d.json` —
+same command, just swap the letter for your own.
 
 Restart Antigravity so it re-reads the file.
 
@@ -98,6 +108,9 @@ write_file(.git/)             no poking at git internals directly
 
 git push --force / -f         in any spelling
 git push <remote> main        no direct pushes to main, ever
+git push <remote> member-X/*  pushing to another member's branch namespace
+                               (blocked on each machine for the other three
+                               letters only — your own letter is unaffected)
 git reset --hard
 git clean -f
 git branch -D
