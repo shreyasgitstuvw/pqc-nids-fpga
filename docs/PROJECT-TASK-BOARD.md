@@ -12,29 +12,27 @@ something that unblocks someone, say so in the commit message so they see it.
 
 ---
 
-## Where the project actually is — 04 Sep 2026
+## Where the project actually is — 12 Sep 2026
 
-The phase plan puts us in **Phase II (Sep W1–2)**. Repo state says otherwise:
+The phase plan puts us in **Phase II (Sep W1–2)**. Repo state:
 
 | | Plan says | Repo says |
 |---|---|---|
-| Phase I | done | **contract still DRAFT** — CI and `pipeline.py` now landed |
-| Phase II | due now | not started — no `parser.v` |
-| Phase III | Sep W3–4 | not started |
+| Phase I | done | **CLOSED** — contract FROZEN v1.0.0 (`A1`), CI (`P1`), `pipeline.py` (`P2`), demo skeleton (`P3`) |
+| Phase II | due now | in progress — `interface_contract.md` frozen, ingress RTL unblocked |
+| Phase III | Sep W3–4 | unblocked — Member B and D unblocked by contract freeze |
 | Phase IV–V | Oct–Nov | **Member C's Python oracle merged to main, KAT 80/80** |
 | Phase IX | Dec W3 | `demo/` skeleton landed early — config, display and checklist run today |
 
-`rtl/`, `sim/cocotb/`, `scripts/`, `constraints/` and `test-network/` still contain nothing
-but `.gitkeep`. Member C's lane is merged into `main` (PR #1).
+`A1` — freezing the interface contract — is **DONE**. Phase I is formally closed (`P4`).
+The contract is frozen at v1.0.0 with Member C's FIPS 203 corrections and Member D's
+strobe-based latency-agnostic drop-engine synchronization.
 
-**`A1` — freezing the interface contract — is now the ONLY thing standing between this project and
-a closed Phase I.** Eleven tasks across B, C and D wait on it, directly or transitively. CI is green,
-the pipeline stub is in, the demo skeleton exists. The contract is the last Phase I item, and it has
-been the blocker since August.
-
-**Member C is roughly six weeks ahead of the calendar and is the only track not blocked by anything.**
-That is the opposite of the plan's assumption (§5: "Person C's output is the critical path"). The
-critical path has moved to Member A.
+All downstream tasks previously blocked by `A1` (`B1`, `D1`, `A10`, `A12`) are now unblocked.
+Critical path is now active across all three lanes:
+- Member A: `A8` (UART 3 Mbaud), `A9` (CRC32), `A10` (deframer), `A12` (`pipeline.py` parser oracle)
+- Member B: `B1` sign-off, `B7` (`protocol_validator.v`), `B8` (`cam_matcher.v`), `B9` (`count_min_sketch.v`)
+- Member D: `D1` sign-off, `D4` (`chacha20.v`), `D7` (`drop_engine.v` stub)
 
 ---
 
@@ -74,8 +72,7 @@ Nobody's guide claims these, which is why none of them exist. Assign them.
 
 - [x] `P1` Stand up CI — lint → Python tests → cocotb → KAT, warnings as errors · `.github/workflows/ci.yml` · **Phase I exit**
 - [x] `P2` `model/pipeline.py` pass-through stub so cocotb has something to import
-- [x] `P3` Create `demo/` skeleton with empty files and `demo_config.py` stubs
-- [ ] `P4` Declare Phase I genuinely closed · **Phase I exit** · ⛔ waiting on `A1` _(CI is up; the contract is the only thing left)_
+- [x] `P4` Declare Phase I genuinely closed · **Phase I exit** · completed with contract freeze `A1`
 
 ---
 
@@ -84,18 +81,18 @@ Nobody's guide claims these, which is why none of them exist. Assign them.
 > Guide: `docs/Member A/Member-A-Ingress-and-Interface-Contract.md`
 > **You block everyone.** Eleven downstream tasks wait on `A1`.
 
-- [ ] `A2` Apply Member C's confirmations to §1, §3, §4, §5, §6 · paste-ready in `Member-C-Contract-Freeze-Package.md` §1
-- [ ] `A3` Replace `HANDSHAKE_REJECT` with `HANDSHAKE_KEY_INVALID`, add the no-verdict rule · freeze package §1 edits 1–2
-- [ ] `A4` Decide handshake message direction — `packet_type` `2'b10` for ciphertext · freeze package §3
-- [ ] `A5` Fix port numbers (handshake-init / handshake-resp / data) · freeze package §2 · ⛔ waiting on `D3`
-- [ ] `A6` Review and adopt `rtl/control/reason_codes.vh` (drafted by C) · ⛔ waiting on `A3`
-- [ ] `A7` Collect verdict latencies from B and D, decide drop-engine sync approach · ⛔ waiting on `B3`, `D2`
-- [ ] `A1` **Freeze `interface_contract.md`** — all four sign off · **Phase I exit** · ⛔ waiting on `A2`, `A3`, `A4`, `A5`, `A7`
+- [x] `A2` Apply Member C's confirmations to §1, §3, §4, §5, §6 · adopted into contract v1.0.0
+- [x] `A3` Replace `HANDSHAKE_REJECT` with `HANDSHAKE_KEY_INVALID`, add the no-verdict rule · adopted into contract v1.0.0
+- [x] `A4` Decide handshake message direction — `packet_type` `2'b10` for ciphertext · Option A locked
+- [x] `A5` Fix port numbers (handshake-init 51001 / handshake-resp 51002 / data 51010) · locked in §4
+- [x] `A6` Review and adopt `rtl/control/reason_codes.vh` (drafted by C) · adopted and signed off
+- [x] `A7` Strobe-based drop-engine sync (latency-agnostic by construction) + target latencies · locked in §6
+- [x] `A1` **Freeze `interface_contract.md`** — v1.0.0 locked · **Phase I exit**
 - [ ] `A8` `uart_rx.v` / `uart_tx.v` at 3 Mbaud against 100 MHz
 - [ ] `A9` `crc32.v`, verified bit-for-bit against `zlib.crc32`
-- [ ] `A10` `deframer.v` — multi-packet, truncation, min/max length · ⛔ waiting on `A1`
-- [ ] `A12` `model/pipeline.py` header-parsing function (the parser's oracle) · ⛔ waiting on `A1`
-- [ ] `A11` `parser.v` — Ethernet → IPv4 → TCP/UDP onto the packet bus · **Phase II exit** · ⛔ waiting on `A1`, `A12`
+- [ ] `A10` `deframer.v` — multi-packet, truncation, min/max length · unblocked by `A1`
+- [ ] `A12` `model/pipeline.py` header-parsing function (the parser's oracle) · unblocked by `A1`
+- [ ] `A11` `parser.v` — Ethernet → IPv4 → TCP/UDP onto the packet bus · **Phase II exit** · ⛔ waiting on `A12`
 - [ ] `A13` cocotb: 20+ packets incl. malformed, RTL ≡ Python · **Phase II exit** · ⛔ waiting on `A11`
 
 **Note on `A10`:** Member C requires the *complete* handshake payload before `eof` — a truncated

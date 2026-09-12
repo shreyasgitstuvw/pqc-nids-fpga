@@ -6,9 +6,8 @@
 // packet, and by drop_engine.v which merges their verdicts.
 //
 // Owner: Member A (contract authority).
-// This file drafted by Member C to make the sec 6 correction concrete --
-// see docs/Member C/Member-C-Contract-Freeze-Package.md. Member A should
-// review, adjust, and adopt; do not treat as frozen until A signs off.
+// Reviewed, adopted, and signed off by Member A as frozen alongside
+// docs/Member A/interface_contract.md v1.0.0.
 //
 // Do not self-assign codes in 4'h9..4'hF. Request them via Member A.
 //==========================================================================
