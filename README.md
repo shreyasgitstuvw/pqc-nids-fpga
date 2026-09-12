@@ -230,3 +230,9 @@ A few files are structurally shared and don't belong to one person. Handle each 
 3. Check the Master Interface Document if the question is about how your module's output is consumed elsewhere.
 4. If it's a shared-file question (§8), post in the group channel before editing — these are the files where silent, uncoordinated changes cost the whole team the most time.
 5. If none of the above resolves it, it's probably a genuine gap in the interface contract — raise it as an issue rather than guessing, since a guess here propagates to everyone downstream of you.
+
+## Working with AI agents
+
+The team uses Google Antigravity. Setup and the three commands you need:
+[docs/AI-WORKFLOW-QUICKSTART.md](docs/AI-WORKFLOW-QUICKSTART.md).
+Agent rules load automatically from [AGENTS.md](AGENTS.md) and `.agents/`.
