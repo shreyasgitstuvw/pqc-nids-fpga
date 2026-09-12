@@ -233,6 +233,9 @@ A few files are structurally shared and don't belong to one person. Handle each 
 
 ## Working with AI agents
 
-The team uses Google Antigravity. Setup and the three commands you need:
-[docs/AI-WORKFLOW-QUICKSTART.md](docs/AI-WORKFLOW-QUICKSTART.md).
+The team uses Google Antigravity.
+
+- **[docs/AI-WORKFLOW-GUIDE.md](docs/AI-WORKFLOW-GUIDE.md)** — read once: how the setup works, a worked session end to end.
+- **[docs/AI-WORKFLOW-QUICKSTART.md](docs/AI-WORKFLOW-QUICKSTART.md)** — keep open: setup and the three commands.
+
 Agent rules load automatically from [AGENTS.md](AGENTS.md) and `.agents/`.
