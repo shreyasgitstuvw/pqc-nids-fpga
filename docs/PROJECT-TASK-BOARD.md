@@ -12,6 +12,28 @@ something that unblocks someone, say so in the commit message so they see it.
 
 ---
 
+## ⚠ Contract amendment v1.1.0 — 17 Sep 2026 — read before starting `B8` or `D4`
+
+`cam_matcher.v` was specified to read payload bytes off the packet bus. On an established session
+those bytes are ChaCha20 ciphertext, which is indistinguishable from random — a signature table can
+never match it, and the module would report zero detections forever while looking perfectly healthy.
+`cam_matcher.v` now reads the **decrypted plaintext stream** from `chacha_poly` instead
+(interface contract **§3.1**, new).
+
+**Who is affected:**
+
+| Member | Impact |
+|---|---|
+| A | None beyond authoring the amendment. Contract is now v1.1.0. |
+| B | `B8` (`cam_matcher.v`) input source changes — **do not build it against the old spec**. `B7`, `B9` unaffected; both still read header fields only and stay parallel to the crypto lane. |
+| C | None. The KEM lane is untouched. |
+| D | `chacha20.v` must expose plaintext output ports (§3.1); `drop_engine.v` gains one telemetry exception (don't count a CAM hit on a tag-failed packet). New: **D now blocks `B8`** on the port names. |
+
+**Nothing else changed** — the strobe-based drop engine absorbed the late lane with no redesign,
+which is exactly what it was built for. Reason codes, packet bus, session table, ports: all unchanged.
+
+---
+
 ## Where the project actually is — 12 Sep 2026
 
 The phase plan puts us in **Phase II (Sep W1–2)**. Repo state:
@@ -104,7 +126,8 @@ consuming module, not a preference.
 ## Member B — Lane 2, threat detection · Phase III
 
 > Guide: `docs/Member B/Member-B-Threat-Detection-Lane.md`
-> You depend on nothing in the crypto lane. Four of your tasks are startable today.
+> `B7` and `B9` depend on nothing in the crypto lane. `B8` now does — see the v1.1.0 note at the
+> top of this file. Four of your tasks are startable today.
 
 - [ ] `B2` Decide FLOOD/SCAN — separate codes or one `VOLUMETRIC` — and tell A · blocks `A7`
 - [ ] `B3` Give A the `count_min_sketch.v` verdict latency · blocks `A7` → blocks `A1`
@@ -114,7 +137,7 @@ consuming module, not a preference.
 - [ ] `B4` Confirm the handshake port sits inside the CMS monitored space · ⛔ waiting on `A5`
 - [ ] `B6` `model/detect.py` — validator, CAM and CMS reference · ⛔ waiting on `A12`
 - [ ] `B7` `protocol_validator.v` — combinational header checks · ⛔ waiting on `B1`, `B6`
-- [ ] `B8` `cam_matcher.v` — 16–32 signatures, 1-cycle match · ⛔ waiting on `B1`, `B6`
+- [ ] `B8` `cam_matcher.v` — 16–32 signatures, 1-cycle match, **reads plaintext stream (contract §3.1), not the packet bus** · ⛔ waiting on `B1`, `B6`, `D4` (plaintext port names)
 - [ ] `B9` `count_min_sketch.v` + `hash_functions.v` · ⛔ waiting on `B5`, `B6`
 - [ ] `B11` Measure false-positive rate on replay vs analytical bound · **Phase III exit** · ⛔ waiting on `B9`, `B10`
 - [ ] `B12` All three detectors emit `{fail, reason_code}` per contract · **Phase III exit** · ⛔ waiting on `B7`, `B8`, `B9`, `D7`
@@ -166,9 +189,12 @@ Lower bounds — no control/memory overhead. At 3 Mbaud, receiving the 768-byte 
 
 > Guide: `docs/Member D/Member-D-ChaCha-Poly-and-Control.md`
 > `chacha20`/`poly1305` depend on nothing — biggest chance to bank progress early.
+> **New in v1.1.0:** `chacha20.v` must expose the §3.1 plaintext ports, and Member B's `B8` is
+> blocked until you agree those port names with them. Agreeing the names is a five-minute
+> conversation and doesn't require your RTL to exist — do it now, not when `D4` finishes.
 
 - [ ] `D3` Check proposed port numbers against test traffic, agree with A · blocks `A5` → blocks `A1`
-- [ ] `D4` `chacha20.v` — quarter-round core, RFC 8439 vectors · **Phase III exit**
+- [ ] `D4` `chacha20.v` — quarter-round core, RFC 8439 vectors, **plus the §3.1 plaintext output ports** · **Phase III exit** · **unblocks `B8`**
 - [ ] `D6` `model/chacha_poly.py` reference for streaming behaviour
 - [ ] `D7` `drop_engine.v` **stub** — just OR the fail bits · **Phase III exit** · **unblocks `B12`**
 - [ ] `D5` `poly1305.v` — MAC accumulator, RFC 8439 vectors · **Phase III exit** · ⛔ waiting on `D4`
@@ -177,7 +203,7 @@ Lower bounds — no control/memory overhead. At 3 Mbaud, receiving the 768-byte 
 - [ ] `D8` `session_mgr.v` — write path blind to rejection · ⛔ waiting on `C6`, `A6`
 - [ ] `D10` Document the priority rule for same-cycle failures from both lanes · ⛔ waiting on `A7`
 - [ ] `D11` `chacha_poly` verified on sustained multi-packet streams · **Phase VI exit** · ⛔ waiting on `D5`, `D6`
-- [ ] `D9` `drop_engine.v` full — per-reason counters, sub-µs, nothing silent · **Phase VI exit** · ⛔ waiting on `A6`, `A7`, `B12`
+- [ ] `D9` `drop_engine.v` full — per-reason counters, sub-µs, nothing silent, **§6 telemetry exception (BAD_TAG suppresses the SIGNATURE count)** · **Phase VI exit** · ⛔ waiting on `A6`, `A7`, `B12`
 - [ ] `D12` Wire counters to the host-visible LED/OLED interface · ⛔ waiting on `D9`
 
 **Two hard requirements on `D8`, from Member C:**

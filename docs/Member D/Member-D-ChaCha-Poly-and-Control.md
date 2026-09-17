@@ -40,6 +40,8 @@ The quarter-round core and streaming keystream generator. This is well-specified
 
 Key property to hold onto: ChaCha20-Poly1305 is add-rotate-XOR only — no substitution boxes, no Galois-field multiplier — which is exactly why it was chosen over AES-GCM (roughly half the logic, easier timing closure at 100 MHz per the synopsis). Don't accidentally reintroduce complexity (e.g., a generic/parameterized cipher framework) that erases this advantage.
 
+**Plaintext tap (contract v1.1.0 — new requirement, read §3.1).** `chacha20.v` must expose the decrypted byte stream as a set of output ports, not keep it internal: `pt_valid`, `pt_data[7:0]`, `pt_sof`, `pt_eof`, plus `pt_tag_ok` / `pt_tag_valid` qualified by `poly1305.v`. Member B's `cam_matcher.v` consumes this — signature matching can only work on plaintext, since ciphertext is indistinguishable from random by design. This is a port-list addition, not a datapath change: you're already producing these bytes, you just need to bring them out. Agree the exact port names with Member B before either of you writes RTL against them.
+
 **Verify:** against RFC 8439's own test vectors first (published, unambiguous), then against `model/chacha_poly.py` for the streaming/pipelined behavior specifically, since the RFC vectors alone don't exercise sustained multi-block throughput.
 
 ### Step 2 — `poly1305.v`
@@ -58,6 +60,7 @@ Design carefully around implicit rejection (see Member C's notes) — a rejected
 Start with a trivial stub in Phase III (just OR the two lanes' `fail` bits, no counting) so Member B's Lane 2 testbenches have something to report a verdict to without waiting on your full implementation. Flesh it out once `reason_codes.vh` is stable:
 
 - One counter per reason code (BAD_TAG, MALFORMED, SIGNATURE, FLOOD, CRC_FAIL, etc.) — the synopsis's core mitigation requirement is that **every discard is counted, never silent** (§3, constraint table: "a silent drop is indistinguishable from an attack that was never detected").
+- **Telemetry exception (contract v1.1.0, §6).** One case breaks the "count every asserting code" rule: if `RC_BAD_TAG` fires on a packet, do **not** also count a simultaneous `RC_SIGNATURE` from `cam_matcher.v`. CAM scans plaintext produced by decrypting under a key that just failed authentication — i.e. noise. A coincidental signature match against noise is not a Log4Shell attempt, and counting it would inflate your detection figures with events that never happened. Count `RC_BAD_TAG` alone and drop the packet. (The existing priority ordering already makes BAD_TAG win the egress verdict register; this is specifically about the *counters*.)
 - Sub-microsecond decision latency (synopsis §6.2: drop happens in the datapath, after parsing and before egress — not at the physical layer, since a packet can't be un-received at the pins).
 - Wire counters to the host-visible interface (LED/OLED driver reads these, per `rtl/io/`) — coordinate with whoever's building the display driver on the exposure format (memory-mapped registers vs. shift-out).
 
@@ -82,6 +85,7 @@ Start with a trivial stub in Phase III (just OR the two lanes' `fail` bits, no c
 - ChaCha20/Poly1305 development starts immediately (no dependency) — don't wait for the KEM to be ready before building and testing the symmetric cipher on synthetic/fixed keys.
 - `session_mgr.v` has a hard dependency on Member C's session-key output format — pin this down early even if you're testing against a stub key in the meantime.
 - `drop_engine.v` has a hard dependency on Member B's `{fail, reason_code}` output and Member A's `reason_codes.vh` — build your stub against the documented contract, not against Member B's actual RTL, so you're not blocked if their timeline shifts.
+- **New in v1.1.0:** Member B's `cam_matcher.v` now has a hard dependency on *your* `chacha_poly` plaintext output ports (§3.1). That makes you a blocker for `B8` in a way you weren't before — pin the port names down with Member B early, even before `chacha20.v` is finished, so they can build their testbench against an agreed interface rather than waiting on your RTL.
 
 ## 7. Common failure modes to watch for
 

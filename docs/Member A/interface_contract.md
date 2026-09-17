@@ -1,8 +1,17 @@
 # Interface Contract
 ## pqc-nids-fpga — Frozen Cross-Module Interfaces
 
-**Status:** FROZEN — v1.0.0 (12 Sep 2026)
+**Status:** FROZEN — v1.1.0 (17 Sep 2026)
 **Owner:** Member A (contract authority). All sections confirmed and locked.
+
+> **Amendment v1.1.0 — read this before resuming work.** §3 and §6 previously had
+> `cam_matcher.v` reading payload bytes straight off the packet bus. On an established
+> session those bytes are ChaCha20 ciphertext, and signature matching against ciphertext
+> cannot work — a stream cipher's output is computationally indistinguishable from random,
+> so a signature table will never match it. `cam_matcher.v` now consumes the decrypted
+> plaintext stream from `chacha_poly` instead (new §3.1). Nothing else in the detection
+> lane changes: `protocol_validator.v` and `count_min_sketch.v` read header fields only and
+> remain fully parallel to the crypto lane. See the changelog at the end of this document.
 **Change Policy:** Any proposed changes to this file must be posted as a diff and approved by Member A. Changes require explicit notification of all affected members whose modules read the changed section (see "Consumers" lines).
 
 ---
@@ -86,9 +95,36 @@ packet_bus_t {
 **Header Constraints & Rejection Rules:**
 - **IPv4 Options:** Packets with `IHL > 5` (options present) are rejected as `RC_MALFORMED` (`4'h3`) by `protocol_validator.v`.
 - **Non-IPv4 EtherTypes:** Non-IPv4 frames (`eth_type != 16'h0800`) are rejected as `RC_MALFORMED` (`4'h3`).
-- **Payload Delivery:** Raw payload bytes stream on `data[7:0]` with `valid`, `sof`, and `eof` after header fields latch. Member B (CAM and sketch) and Member C (handshake extraction) consume payload bytes directly from this bus.
+- **Payload Delivery:** Raw payload bytes stream on `data[7:0]` with `valid`, `sof`, and `eof` after header fields latch. Member C (`mlkem_top.v`, handshake object extraction) and Member D (`chacha_poly`, ciphertext + tag) consume these bytes directly.
+- **Payload Delivery — detection lane (amended v1.1.0):** `protocol_validator.v` and `count_min_sketch.v` read **header fields only** (`ip_*`, `l4_*`, `tcp_flags`, `payload_len`) and are unaffected by whether the payload is encrypted. `cam_matcher.v` does **not** read `data[7:0]` from this bus — on `packet_type == 2'b01` those bytes are ChaCha20 ciphertext. It reads the decrypted plaintext stream instead; see §3.1.
 
 **Consumers:** Member B (`protocol_validator.v`, `cam_matcher.v`, `count_min_sketch.v`), Member C (`mlkem_top.v`), Member D (`chacha_poly`, `session_mgr.v`, `drop_engine.v`).
+
+---
+
+## 3.1 Plaintext inspection bus — `chacha_poly` → `cam_matcher.v` *(added v1.1.0)*
+
+Signature matching requires plaintext. On an established session (`packet_type == 2'b01`), `packet_bus_t.data` carries ChaCha20 ciphertext, which is computationally indistinguishable from random by construction of the cipher — a signature table can never match it, and a `cam_matcher.v` wired to that bus would report zero detections forever while appearing to work. `cam_matcher.v` therefore consumes the decrypted byte stream emitted by `chacha_poly`.
+
+```verilog
+// Driven by Member D (chacha_poly), consumed by Member B (cam_matcher.v)
+output reg       pt_valid;      // asserted for every cycle carrying a decrypted plaintext byte
+output reg [7:0] pt_data;       // decrypted payload byte
+output reg       pt_sof;        // first plaintext byte of this packet
+output reg       pt_eof;        // last plaintext byte of this packet
+output reg       pt_tag_ok;     // qualifies the packet just streamed: 1 = Poly1305 tag verified
+output reg       pt_tag_valid;  // 1-cycle strobe: pt_tag_ok is now meaningful (at or after pt_eof)
+```
+
+**Streaming, not store-and-forward.** ChaCha20 decryption and Poly1305 accumulation both consume the same ciphertext stream and run concurrently (standard AEAD structure), so plaintext bytes emerge as the packet streams in. `cam_matcher.v` scans `pt_data` inline exactly as it would have scanned the raw bus — the sliding-window match design is unchanged, only the source of the bytes moves. There is no second pass, no store-and-forward buffer, and no added latency beyond what `chacha_poly` already imposes on the packet.
+
+**Tag qualification and ordering.** `pt_tag_ok` becomes meaningful at or after `pt_eof` — that is, *after* CAM has already scanned the stream. This ordering is intentional and safe. CAM may raise `RC_SIGNATURE` speculatively on a packet whose tag later proves invalid, because `RC_BAD_TAG` outranks `RC_SIGNATURE` in the §6 priority ordering and the packet is discarded either way. A "match" against the decrypted garbage of a forged ciphertext is meaningless but harmless: it can only cause a drop, never a forward, and the correct reason code still wins the egress verdict register.
+
+**Telemetry caveat.** `drop_engine.v` must **not** count a CAM hit on a tag-failed packet as a confirmed signature detection. A forged packet decrypts to noise; a coincidental match against that noise is not evidence of a Log4Shell attempt, and counting it would corrupt the detection-accuracy figures the final report depends on. See §6.
+
+**Handshake packets.** On `packet_type == 2'b00` / `2'b10` there is no session key and no plaintext, so `cam_matcher.v` does not participate. Handshake traffic remains covered by `crc32.v`, `protocol_validator.v`, and `count_min_sketch.v` — a handshake flood is a volumetric attack and must still be caught.
+
+**Consumers:** Member B (`cam_matcher.v`), Member D (`chacha_poly` drives these ports; `drop_engine.v` qualifies the verdict).
 
 ---
 
@@ -203,7 +239,7 @@ To eliminate cross-module timing brittleness and avoid mid-build revisions, `dro
 2. **Early Fail Termination:** If any lane asserts `verdict.valid` with `fail = 1`, `drop_engine.v` immediately flags the frame for discard and latches the corresponding reason code.
 3. **Commit on Full Resolution:** For a packet to be forwarded, all active lanes assigned to that `packet_type` must assert `verdict.valid` with `fail = 0`.
 4. **Lane Participation by Packet Type:**
-   - **Data Packets (`packet_type == 2'b01`):** Participating lanes are `crc32.v`, `protocol_validator.v`, `cam_matcher.v`, `count_min_sketch.v`, and `poly1305.v`.
+   - **Data Packets (`packet_type == 2'b01`):** Participating lanes are `crc32.v`, `protocol_validator.v`, `cam_matcher.v`, `count_min_sketch.v`, and `poly1305.v`. **Amended v1.1.0:** of these, `crc32.v`, `protocol_validator.v`, and `count_min_sketch.v` evaluate in parallel directly off the packet bus, unaffected by the crypto lane. `cam_matcher.v` evaluates off the decrypted plaintext stream from `chacha_poly` (§3.1) and therefore resolves no earlier than `poly1305.v` does. The strobe-based design below already handles this correctly — no drop-engine restructuring is required, only the later arrival of one lane's `valid`.
    - **Handshake Packets (`packet_type == 2'b00, 2'b10`):** Handshake key validation runs out-of-band in `mlkem_top.v` and signals only on structural failure via `kem_key_invalid`.
 
 #### Provisional Target Latency Reference
@@ -214,7 +250,7 @@ To eliminate cross-module timing brittleness and avoid mid-build revisions, `dro
 |---|---|---|
 | `crc32.v` | 0 cycles after `eof` | Computed inline during streaming; ready at `eof` cycle |
 | `protocol_validator.v` | 0–1 cycles after header latch | Pure combinational check or single registered stage |
-| `cam_matcher.v` | 1 cycle after byte stream | 1-cycle match lookup in parallel CAM |
+| `cam_matcher.v` | 1 cycle after **plaintext** stream ends | 1-cycle parallel CAM lookup, but gated behind `chacha_poly` decrypt (§3.1) — resolves alongside `poly1305.v`, not alongside the header checks |
 | `count_min_sketch.v` | ~2–4 cycles after `eof` | Hash compute + multi-bank BRAM read/compare (target latency, confirm once B7/B9 exist) |
 | `poly1305.v` | 0–2 cycles after `eof` | Inline accumulator; tag comparison completes at `eof` (target latency, confirm once D5 exists) |
 | `fo_transform.v` | **N/A — emits no verdict** | Excluded from drop-engine path; implicit rejection is silent |
@@ -222,7 +258,7 @@ To eliminate cross-module timing brittleness and avoid mid-build revisions, `dro
 
 #### Simultaneous-Failure Priority Rule
 If multiple lanes signal `fail = 1` for the same packet:
-1. **Telemetry:** `drop_engine.v` increments separate counters for **all** asserting reason codes, preserving complete threat telemetry.
+1. **Telemetry:** `drop_engine.v` increments separate counters for **all** asserting reason codes, preserving complete threat telemetry. **Exception (v1.1.0):** if `RC_BAD_TAG` asserts on a packet, a simultaneous `RC_SIGNATURE` from `cam_matcher.v` is **not** counted as a signature detection — the plaintext CAM scanned was decrypted under a key that failed authentication, so the "match" is against noise, not against an attack payload. Count `RC_BAD_TAG` only.
 2. **Single-Egress Verdict Register Priority:** If downstream hardware requires a single dominant code, priority is ordered by inspection layer:
    $$\text{RC\_CRC\_FAIL} > \text{RC\_FRAME\_TIMEOUT} > \text{RC\_MALFORMED} > \text{RC\_BAD\_TAG} > \text{RC\_SIGNATURE} > \text{RC\_FLOOD} > \text{RC\_SCAN} > \text{RC\_HANDSHAKE\_KEY\_INVALID}$$
 
@@ -232,10 +268,31 @@ If multiple lanes signal `fail = 1` for the same packet:
 
 | Role | Member | Status | Notes |
 |---|---|---|---|
-| Ingress / Contract Authority | **Member A** | **SIGNED OFF** | Architecture and interfaces locked |
-| Threat Detection Lane | **Member B** | PENDING SIGN-OFF | `B1` unblocked; verify CMS / CAM interfaces |
-| ML-KEM Crypto Core | **Member C** | **SIGNED OFF** | Adopted freeze package & reason_codes.vh |
-| ChaCha-Poly & Control | **Member D** | PENDING SIGN-OFF | `D1` unblocked; verify drop_engine strobe interface |
+| Ingress / Contract Authority | **Member A** | **SIGNED OFF** (v1.1.0) | Architecture and interfaces locked; authored the §3.1 amendment |
+| Threat Detection Lane | **Member B** | PENDING SIGN-OFF (v1.1.0) | `B1` unblocked. **Re-read §3.1 before building `B8`** — `cam_matcher.v`'s input source changed |
+| ML-KEM Crypto Core | **Member C** | **SIGNED OFF** (v1.1.0) | Adopted freeze package & reason_codes.vh; KEM lane unaffected by the v1.1.0 amendment |
+| ChaCha-Poly & Control | **Member D** | PENDING SIGN-OFF (v1.1.0) | `D1` unblocked. **`chacha_poly` must expose the §3.1 plaintext bus**; `drop_engine.v` must apply the §6 telemetry exception |
 
 ---
-*End of Interface Contract v1.0.0. All downstream RTL must conform to these definitions.*
+
+## 8. Changelog
+
+### v1.1.0 — 17 Sep 2026 — plaintext inspection bus
+
+**What changed and why.** v1.0.0 had `cam_matcher.v` reading payload bytes straight off `packet_bus_t.data` (§3). For established-session data packets those bytes are ChaCha20 ciphertext. Signature matching against ciphertext is not merely unreliable, it is impossible in principle: a secure stream cipher's output is computationally indistinguishable from random, so a signature table matching known plaintext attack patterns (Log4Shell's `${jndi:ldap://`, shellcode byte sequences, and so on) would never fire. The failure mode is silent — the module lints, simulates, reports zero matches, and looks healthy while detecting nothing.
+
+**Sections changed:**
+- **§3** — payload delivery split: header-only consumers (`protocol_validator.v`, `count_min_sketch.v`) vs. raw-byte consumers (`mlkem_top.v`, `chacha_poly`). `cam_matcher.v` removed from raw-bus consumers.
+- **§3.1 (new)** — plaintext inspection bus: `pt_valid` / `pt_data` / `pt_sof` / `pt_eof` / `pt_tag_ok` / `pt_tag_valid`, driven by `chacha_poly`, consumed by `cam_matcher.v`.
+- **§6** — lane participation clarified: CAM resolves no earlier than Poly1305; latency table row updated; telemetry exception added so a CAM hit on a tag-failed packet is not counted as a signature detection.
+- **§7** — Member B and Member D sign-offs reset pending re-read.
+
+**What did *not* change:** the strobe-based drop-engine architecture (it already tolerates a late lane by construction — this is exactly the brittleness it was designed to absorb), the reason-code enum, the packet bus struct fields, the session register file, the port assignments, the implicit-rejection rule, and the entire KEM lane. `protocol_validator.v` and `count_min_sketch.v` are untouched and remain fully parallel to the crypto lane.
+
+**Impact by member:** Member A — none beyond authoring this. Member B — `B8` (`cam_matcher.v`) input source changes before it is built; `B7`/`B9` unaffected. Member C — none. Member D — `chacha_poly` gains the §3.1 output ports; `drop_engine.v` gains the telemetry exception.
+
+### v1.0.0 — 12 Sep 2026 — initial freeze
+Phase I closeout. Port-based `packet_type` classification (Option A), `RC_HANDSHAKE_KEY_INVALID` replacing the originally proposed `HANDSHAKE_REJECT`, strobe-based latency-agnostic drop-engine synchronization, session table sized for 4 concurrent sessions.
+
+---
+*End of Interface Contract v1.1.0. All downstream RTL must conform to these definitions.*

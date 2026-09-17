@@ -25,16 +25,16 @@ Each member's guide describes their own module in isolation. This document descr
         │  ML-KEM-512 engine     │      (32-byte shared secret,        │  ChaCha20-Poly1305      │
         │  keygen/encaps/decaps  │       written to session register)  │  session_mgr            │
         │  FO transform          │                                    │  {fail, reason_code}    │
-        │  {fail=n/a on success, │                                    └───────────┬─────────────┘
-        │   reason=REJECT on     │                                                │
-        │   implicit rejection}  │                                                │
-        └───────────┬────────────┘                                               │
-                    │                                                             │
-                    │            ┌───────────────────────┐                        │
-                    │            │      MEMBER B          │                        │
-                    │            │  cam_matcher            │                        │
-                    │            │  count_min_sketch       │                        │
-                    │            │  protocol_validator      │                        │
+        │  NO verdict emitted    │                                    └───────────┬─────────────┘
+        │  on implicit rejection │                                                │
+        │  (see contract §6)     │                                    plaintext   │
+        └───────────┬────────────┘                                    stream      │
+                    │                                                  (§3.1)     │
+                    │            ┌───────────────────────┐               │        │
+                    │            │      MEMBER B          │◀──────────────┘        │
+                    │            │  count_min_sketch  ◀── header fields            │
+                    │            │  protocol_validator ◀── header fields           │
+                    │            │  cam_matcher       ◀── PLAINTEXT, not the bus   │
                     │            │  {fail, reason_code}    │                        │
                     │            └───────────┬─────────────┘                        │
                     │                        │                                       │
@@ -50,7 +50,9 @@ Each member's guide describes their own module in isolation. This document descr
                         clean packet out (or dropped, counted, logged)
 ```
 
-**The single most important structural fact:** the packet bus coming out of Member A's parser is read by Member B's detection lane and (for the relevant packet types) Member C/D's crypto lane *in the same clock cycle* — the lanes never wait on each other. This is what the synopsis means by the design being "sub-additive": the expensive parts (lattice math and signature/volume checks) run concurrently on the same packet, not one after another.
+**The single most important structural fact:** the packet bus coming out of Member A's parser is read by Member B's detection lane and (for the relevant packet types) Member C/D's crypto lane *in the same clock cycle* — the lanes never wait on each other. This is what the synopsis means by the design being "sub-additive": the expensive parts (lattice math and volume/header checks) run concurrently on the same packet, not one after another.
+
+**One documented exception (contract v1.1.0, §3.1):** `cam_matcher.v` is the single detector that cannot run off the raw bus, because it matches against payload *content* and on an established session that content is ChaCha20 ciphertext — indistinguishable from random, so no signature will ever match it. `cam_matcher.v` therefore reads the decrypted plaintext stream out of `chacha_poly` and resolves alongside `poly1305.v` rather than alongside the header checks. `protocol_validator.v` and `count_min_sketch.v` are unaffected: they read header fields, which are never encrypted, and remain fully parallel. The sub-additive property still holds for the lane as a whole — CAM's scan is inline on a stream that decryption is already producing, so it adds no pass of its own.
 
 ---
 
@@ -78,7 +80,7 @@ Each member's guide describes their own module in isolation. This document descr
 
 **What crosses this seam:** `{fail, reason_code}` from Member B's detection lane (evaluating every packet), and `{fail, reason_code}` from the cryptographic checks (Poly1305 tag verification, which lives conceptually with Member D's ChaCha module, and CRC failure, which is Member A's ingress layer feeding in earlier).
 
-**Timing requirement:** both lanes must assert their verdict a *known, fixed* number of cycles after a packet's `eof`, so the drop engine knows exactly when it's safe to make a final forward/drop decision. If Member B's CAM lookup (1 cycle) and Member C/D's Poly1305 check (however many cycles that takes) complete at different latencies, the drop engine's design must account for the *slower* of the two paths — this needs to be pinned down as a specific number in the interface contract, not left as "whenever each lane happens to finish."
+**Timing requirement — resolved in contract v1.0.0, and the resolution is why v1.1.0 was cheap.** Rather than pinning each lane to a fixed post-`eof` cycle count, `drop_engine.v` synchronizes on per-lane `verdict.valid` strobes and is latency-agnostic by construction. This turned out to matter: when v1.1.0 moved `cam_matcher.v` behind the decrypt stage, its verdict got strictly later, and the drop engine needed no change at all. A hardcoded cycle-count design would have required a contract revision and a rebuild.
 
 **What can go wrong here:** if both lanes can fail on the *same* packet in the *same* cycle, there needs to be an agreed, documented priority rule for which reason code gets logged (or whether both get logged as separate counter increments) — otherwise different team members' modules might implicitly assume different priority orderings, and the final reason-code statistics in your report become internally inconsistent depending on which path happened to be checked last.
 
@@ -91,8 +93,8 @@ This is the sequence to have in your head when reasoning about integration, and 
 1. **Device A sends its ML-KEM encapsulation key.** Member A's ingress pipeline receives it, parses it as a handshake-type packet, places it on the packet bus.
 2. **Member C's engine recognizes this as a handshake packet** (not regular data — this distinction needs to be encoded somewhere in the packet bus or a dedicated packet-type field, decided in the interface contract) and begins encapsulation/decapsulation processing. Member B's detection lane also sees this packet on the same bus but has nothing meaningful to flag on a legitimate handshake packet (it still runs its checks — protocol validation still applies — but shouldn't false-positive on normal handshake traffic; worth an explicit test case).
 3. **Handshake completes.** Member C writes the shared secret and `ESTABLISHED` state into the session register. Member D's `session_mgr.v` observes this transition and now permits `chacha_poly` to use that key for subsequent data packets on this session.
-4. **Device A sends encrypted data packets.** Each one flows through Member A's ingress → packet bus → **both lanes simultaneously**: Member D's ChaCha20-Poly1305 checks the authentication tag (was this altered in transit?), while Member B's CAM/CMS/validator independently checks for known signatures and volumetric anomalies, entirely unaware of and unaffected by whether the crypto check passes or fails.
-5. **An attacker (third device) injects a tampered or malicious packet.** Depending on what's wrong with it: a bad Poly1305 tag fails Member D's check; a known malicious payload fails Member B's CAM check; an unusually high volume from that source trips Member B's CMS; a malformed header fails Member B's protocol validator. Any one of these (or several at once) asserts `{fail, reason_code}`.
+4. **Device A sends encrypted data packets.** Each one flows through Member A's ingress → packet bus. Member D's ChaCha20-Poly1305 checks the authentication tag (was this altered in transit?) and decrypts; Member B's `protocol_validator.v` and `count_min_sketch.v` run simultaneously off the header fields, unaware of and unaffected by the crypto result. `cam_matcher.v` scans the plaintext stream emerging from the decrypt (§3.1) — it is the one detector whose input depends on the crypto lane, because signatures only exist in plaintext.
+5. **An attacker (third device) injects a tampered or malicious packet.** Depending on what's wrong with it: a bad Poly1305 tag fails Member D's check; a known malicious payload inside an *authentic* session fails Member B's CAM check; an unusually high volume from that source trips Member B's CMS; a malformed header fails Member B's protocol validator. Any one of these (or several at once) asserts `{fail, reason_code}`. Note the two threat models are distinct: `RC_BAD_TAG` means an outsider altered bytes in transit, `RC_SIGNATURE` means an authenticated peer sent something malicious. If both fire on one packet, BAD_TAG wins and the CAM hit is not counted — see contract §6.
 6. **Member D's drop_engine merges the verdicts**, increments the appropriate reason-code counter(s), and discards the packet before it reaches the host — all within the sub-microsecond budget the synopsis specifies, since this decision happens in the datapath, not at the physical layer.
 7. **The counted, categorized drop is visible** on the LED/OLED status display and the live command-line readout on both legitimate devices and the attacker's own view of what got through — nothing is silently lost.
 

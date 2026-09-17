@@ -1,7 +1,19 @@
 # Member B — Master Guide
 ## Track: Lane 2 — Threat Detection (CAM Signature Matcher, Count-Min Sketch, Protocol Validator)
 
-You own the entire "is this hostile?" half of the design. This lane is architecturally independent of the ML-KEM/ChaCha crypto lane — you don't need session keys, encryption, or anything cryptographic to build or test your half. That independence is deliberate: you can start the day the interface contract is frozen and work in parallel with the crypto team without waiting on them.
+You own the entire "is this hostile?" half of the design.
+
+> **Updated 17 Sep 2026 (interface contract v1.1.0) — one of your three modules moved.**
+> Two of your three detectors are still fully independent of the crypto lane: `protocol_validator.v`
+> and `count_min_sketch.v` read **header fields only** (IP addresses, ports, TCP flags, lengths),
+> which are never encrypted, so you can build and test both without a session key or anything
+> cryptographic. `cam_matcher.v` is the exception. It matches against **payload content**, and on an
+> established session the payload arriving on the packet bus is ChaCha20 ciphertext — random-looking
+> bytes that a signature table can never match. `cam_matcher.v` now reads the **decrypted plaintext
+> stream** from Member D's `chacha_poly` instead. See **§3.1 of the interface contract** before you
+> build it. Your matching logic doesn't change; only where the bytes come from changes.
+
+Most of this lane still starts the day the contract is frozen, in parallel with the crypto team.
 
 ---
 
@@ -48,7 +60,26 @@ Checks to implement:
 **Verify:** hand-craft ~15 malformed packets covering each check, confirm `model/detect.py`'s validator function and your RTL agree.
 
 ### Step 2 — `cam_matcher.v`
-Content-addressable memory: given a packet's payload (or a relevant header fingerprint, per your signature design), resolve a match against a stored signature table in one clock cycle, regardless of how many signatures are stored.
+Content-addressable memory: given a packet's payload, resolve a match against a stored signature table in one clock cycle, regardless of how many signatures are stored.
+
+**Where your bytes come from (contract v1.1.0 — read §3.1 first).** Not `packet_bus_t.data`. You consume the plaintext stream Member D's `chacha_poly` emits after decryption:
+
+```verilog
+input        pt_valid;      // this cycle carries a decrypted plaintext byte
+input  [7:0] pt_data;       // the byte to scan
+input        pt_sof;        // first plaintext byte of the packet
+input        pt_eof;        // last plaintext byte of the packet
+input        pt_tag_ok;     // 1 = Poly1305 verified this packet
+input        pt_tag_valid;  // 1-cycle strobe: pt_tag_ok is now meaningful
+```
+
+Why: ChaCha20 output is computationally indistinguishable from random. A signature table scanning ciphertext would lint cleanly, simulate cleanly, report zero matches forever, and detect nothing — the worst kind of bug, because it looks like success. Scanning plaintext is the only way this module can do its job.
+
+What this does **not** change: it's still a streaming, sliding-window, one-cycle-match design. Plaintext bytes arrive incrementally as `chacha_poly` decrypts, so you scan inline exactly as you would have off the raw bus. No store-and-forward buffer, no second pass.
+
+What it **does** change: your verdict now resolves alongside `poly1305.v` rather than alongside the header checks, and you don't participate at all on handshake packets (`packet_type == 2'b00` / `2'b10`) — there's no session key, so there's no plaintext. Don't assert `verdict.valid` on those.
+
+You may scan before `pt_tag_ok` is known; that's fine and expected. If the tag later fails, `RC_BAD_TAG` outranks your `RC_SIGNATURE` and the packet is dropped anyway — but note that `drop_engine.v` deliberately will not count your hit as a real detection in that case (the bytes you matched were decrypted under a key that failed authentication, so the "match" was against noise). Don't treat that as your module misbehaving.
 
 Design decisions to make and document:
 - Start with 16–32 signatures. Don't over-engineer table size before timing closure — expand later if you have logic budget to spare (synopsis's logic budget table gives Lane 2 ≈5,030 LUTs; CAM is part of that).
@@ -92,3 +123,4 @@ You're the natural owner of this since you consume it most heavily. Trim the ful
 - Sizing the CMS from intuition instead of the (epsilon, delta) formula — you'll end up either wasting BRAM or reporting an accuracy number you can't defend in the report.
 - Signature set and test-vector set drifting out of sync (e.g., testing against attacks your CAM table was never loaded with) — keep both derived from the same CIC-IDS2017 subset.
 - Conflating "malformed" (protocol_validator) with "malicious" (CAM/CMS) reason codes — they're different failure classes and the report should be able to break them apart.
+- Wiring `cam_matcher.v` to `packet_bus_t.data` out of habit (or because an older draft of a doc said so). It will build, lint, simulate, and report zero matches forever. Your CAM testbench must feed it **plaintext**, and your signature table and test vectors must both be plaintext patterns — if your test passes while feeding ciphertext, the test is wrong, not the module.
