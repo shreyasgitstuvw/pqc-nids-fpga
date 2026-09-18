@@ -69,9 +69,9 @@ Nothing is stopping any of these. If you own one, there is no reason it isn't mo
 | `A4` | A | Decide handshake message direction (`packet_type` `2'b10` for ciphertext) |
 | `A8` | A | `uart_rx.v` / `uart_tx.v` at 3 Mbaud |
 | `A9` | A | `crc32.v` vs `zlib.crc32` |
-| `B2` | B | FLOOD/SCAN — separate codes or one, tell A |
-| `B3` | B | CMS verdict latency → A |
-| `B5` | B | CMS sizing: k, w, (ε,δ) against ≈11.5 of 140 BRAMs |
+| `B1` | B | Read and sign off interface contract v1.0.0 |
+| `B4` | B | Confirm handshake port sits inside CMS monitored space |
+| `B9` | B | `count_min_sketch.v` + `hash_functions.v` RTL |
 | `B10` | B | Curate labeled `cicids2017_subset/` |
 | `C8` | C | `keccak_f1600.v` — first RTL of the crypto lane |
 | `C10` | C | `ntt_core.v` / `butterfly.v` / `modmul.v` |
@@ -129,16 +129,16 @@ consuming module, not a preference.
 > `B7` and `B9` depend on nothing in the crypto lane. `B8` now does — see the v1.1.0 note at the
 > top of this file. Four of your tasks are startable today.
 
-- [ ] `B2` Decide FLOOD/SCAN — separate codes or one `VOLUMETRIC` — and tell A · blocks `A7`
-- [ ] `B3` Give A the `count_min_sketch.v` verdict latency · blocks `A7` → blocks `A1`
-- [ ] `B5` CMS sizing on paper — k, w, (ε,δ) bound against ≈11.5 of 140 BRAMs
+- [x] `B2` Decide FLOOD/SCAN — separate codes `RC_FLOOD` (4'h5) and `RC_SCAN` (4'h6) adopted in reason_codes.vh & contract v1.0.0; distinction modeled in model/detect.py
+- [x] `B3` Give A the `count_min_sketch.v` verdict latency · 2 cycles after eof, drop engine strobe-based in contract §6
+- [x] `B5` CMS sizing on paper — dual-sketch (flow w=2048, host w=1024, k=4), 6.0/11.5 BRAM36 tiles (52.2%), analytical bound & noise floor verified in model/detect.py
 - [ ] `B10` Curate labeled `sim/vectors/cicids2017_subset/`
 - [ ] `B1` Read and sign off the interface contract · ⛔ waiting on `A2`, `A3`, `A4`
 - [ ] `B4` Confirm the handshake port sits inside the CMS monitored space · ⛔ waiting on `A5`
-- [ ] `B6` `model/detect.py` — validator, CAM and CMS reference · ⛔ waiting on `A12`
-- [ ] `B7` `protocol_validator.v` — combinational header checks · ⛔ waiting on `B1`, `B6`
-- [ ] `B8` `cam_matcher.v` — 16–32 signatures, 1-cycle match, **reads plaintext stream (contract §3.1), not the packet bus** · ⛔ waiting on `B1`, `B6`, `D4` (plaintext port names)
-- [ ] `B9` `count_min_sketch.v` + `hash_functions.v` · ⛔ waiting on `B5`, `B6`
+- [x] `B6` `model/detect.py` — validator, CAM and CMS reference + 800-flow collision test landed (commit 70ddb03)
+- [ ] `B7` `protocol_validator.v` — combinational header checks · ⛔ waiting on `B1`
+- [ ] `B8` `cam_matcher.v` — 16–32 signatures, 1-cycle match, **reads plaintext stream (contract §3.1), not the packet bus** · ⛔ waiting on `B1`, `D4` (plaintext port names)
+- [ ] `B9` `count_min_sketch.v` + `hash_functions.v` · unblocked by `B5`, `B6`
 - [ ] `B11` Measure false-positive rate on replay vs analytical bound · **Phase III exit** · ⛔ waiting on `B9`, `B10`
 - [ ] `B12` All three detectors emit `{fail, reason_code}` per contract · **Phase III exit** · ⛔ waiting on `B7`, `B8`, `B9`, `D7`
 
