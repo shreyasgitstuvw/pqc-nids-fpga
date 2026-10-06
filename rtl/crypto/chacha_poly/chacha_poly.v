@@ -93,7 +93,7 @@ module chacha_poly (
     localparam [3:0] S_WAIT_PAD_CT  = 4'd11;
     localparam [3:0] S_FEED_LEN     = 4'd12;
     localparam [3:0] S_WAIT_TAG     = 4'd13;
-    localparam [3:0] S_FINALIZE     = 4'd14;
+    // State 4'd14 is intentionally unused; unreachable encodings go to S_IDLE via default.
 
     reg [3:0] state;
 
@@ -110,7 +110,6 @@ module chacha_poly (
     reg [5:0]   ct_block_byte_idx;  // 0..63 within current ChaCha20 block
     reg [7:0]   ct_chunk [0:15];
     reg [3:0]   ct_chunk_count;     // 0..15 within current 16-byte Poly1305 chunk
-    reg [2:0]   poly_wait_cnt;
 
     // =========================================================================
     // ChaCha20 Submodule Signals
@@ -196,6 +195,13 @@ module chacha_poly (
         .v_poly_reason(poly_v_reason)
     );
 
+    // Sub-module outputs intentionally not used at this level: busy flags,
+    // the upper half of the 64-byte keystream block (only the first 32 bytes
+    // form the one-time key), and poly1305's own verdict/qualifier strobes
+    // (this module generates v_poly_* and pt_tag_* itself).
+    wire _unused_ok = &{1'b0, cc_busy, cc_keystream_block[511:256], poly_busy,
+                        poly_pt_tag_ok, poly_pt_tag_valid, poly_v_valid};
+
     assign tag_out = poly_tag_out;
     assign tag_ok  = poly_tag_ok;
 
@@ -260,7 +266,6 @@ module chacha_poly (
             cc_block_counter  <= 32'd0;
             ct_block_byte_idx <= 6'd0;
             ct_chunk_count    <= 4'd0;
-            poly_wait_cnt     <= 3'd0;
 
             cc_start          <= 1'b0;
             cc_key            <= 256'd0;

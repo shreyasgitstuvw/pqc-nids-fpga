@@ -124,7 +124,7 @@ module poly1305 (
         begin
             bdata = 128'd0;
             for (j = 0; j < 16; j = j + 1) begin
-                if (use_in_byte && (j == len - 1))
+                if (use_in_byte && (j == ({27'd0, len} - 32'd1)))
                     bdata[j*8 +: 8] = in_byte;
                 else if (j < len)
                     bdata[j*8 +: 8] = buf_bytes[j];
@@ -289,7 +289,7 @@ module poly1305 (
 
                 S_MUL_HI: begin
                     // Stage 2 of multiplication: add (cur_a * r[127:64] << 64)
-                    full_prod <= prod_lo + ((cur_a * r_reg[127:64]) << 64);
+                    full_prod <= {64'd0, prod_lo} + ((cur_a * r_reg[127:64]) << 64);
                     state     <= S_REDUCE;
 
                     // Buffer any incoming streaming bytes during multiplication pipeline
@@ -310,21 +310,23 @@ module poly1305 (
                         reg [129:0] s1_lo;
                         reg [2:0]   s1_hi;
                         reg [130:0] s2;
-                        reg [131:0] sub1;
+                        reg [129:0] sub1;
                         reg [129:0] res;
 
                         p_lo  = full_prod[129:0];
                         p_hi  = full_prod[258:130];
-                        s1    = p_lo + ((p_hi << 2) + p_hi); // p_lo + p_hi * 5
+                        s1    = {3'd0, p_lo} + (({4'd0, p_hi} << 2) + {4'd0, p_hi}); // p_lo + p_hi * 5
 
                         s1_lo = s1[129:0];
                         s1_hi = s1[132:130];
-                        s2    = s1_lo + ((s1_hi << 2) + s1_hi); // s1_lo + s1_hi * 5
+                        s2    = {1'b0, s1_lo} + (({128'd0, s1_hi} << 2) + {128'd0, s1_hi}); // s1_lo + s1_hi * 5
 
-                        sub1  = {1'b0, s2} - {1'b0, P_PRIME};
+                        // Conditional subtract of P = 2^130 - 5. When s2 >= P the true
+                        // difference is < P < 2^130, so its low 130 bits are exact.
+                        sub1  = s2[129:0] - P_PRIME[129:0];
 
-                        if (sub1[131] == 1'b0)
-                            res = sub1[129:0];
+                        if (s2 >= P_PRIME)
+                            res = sub1;
                         else
                             res = s2[129:0];
 

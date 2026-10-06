@@ -24,6 +24,8 @@
 // synchronous active-high reset rst, registered outputs, no latches,
 // no DSPs, no BRAMs.
 
+`timescale 1ns / 1ps
+
 module chacha20 (
     input  wire         clk,
     input  wire         rst,

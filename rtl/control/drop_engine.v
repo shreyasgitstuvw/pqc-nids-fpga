@@ -159,9 +159,11 @@ module drop_engine (
         end
     endfunction
 
-    // Check if any failure has been recorded
-    wire any_fail = fail_crc || fail_deframe || fail_proto || fail_poly ||
-                    fail_cam || fail_cms_flood || fail_cms_scan || fail_kem;
+    // Unused-by-design inputs (contract-uniform ports): the dominant reason is
+    // derived from which lane failed, so per-lane reason fields and pkt_eof are
+    // not consumed here. Tied into a sink so -Wall stays clean.
+    wire _unused_ok = &{1'b0, pkt_eof, v_crc_reason, v_deframe_reason,
+                        v_proto_reason, v_cam_reason, v_poly_reason, v_kem_reason};
 
     reg rep_crc;
     reg rep_proto;
