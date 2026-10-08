@@ -133,6 +133,9 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq iverilog
       - run: pip install -r requirements-dev.txt
         if: steps.find.outputs.count != '0'
+      # Testbenches use cocotb's Python runner (each test_*.py is self-contained
+      # and documents `python sim/cocotb/test_x.py  (or pytest)`), so there is no
+      # Makefile flow to invoke. `make -C sim` pointed at a flow nobody uses.
       - name: Run
         if: steps.find.outputs.count != '0'
-        run: make -C sim
+        run: pytest sim/cocotb/ -q
