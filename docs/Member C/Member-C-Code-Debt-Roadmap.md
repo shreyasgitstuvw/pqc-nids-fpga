@@ -48,6 +48,9 @@ fix — there is a CI step pointing at a flow nobody uses.
 **Cost:** ~20 minutes. **Blocks:** `C9`, `C11`, `C16`, and every verification task
 any member will ever write.
 
+**CLEARED — 8 Oct 2026.** `sim/makefile/` removed; the CI sim job now runs
+`pytest sim/cocotb/ -q`.
+
 ### 0.2 No simulator on any machine in the team
 
 Neither `verilator`, `iverilog`, nor `cocotb` is installed on the Cowork Linux VM,
@@ -70,6 +73,8 @@ get the same loop when they need it.
 `rtl/crypto/ntt/` and `rtl/crypto/kem/` were never made.
 **Fix:** create them with `.gitkeep`. **Cost:** one minute.
 
+**CLEARED — 8 Oct 2026.**
+
 ---
 
 ## Tier 1 — do these before writing `keccak_f1600.v`, not after
@@ -87,11 +92,21 @@ no information about which constant is wrong. Localising that by bisection costs
 more than a day. The same class of bug later costs a week inside `mlkem_top.v`,
 where a wrong Keccak silently corrupts every SHAKE expansion downstream.
 
-**Fix:** a short generator — `model/mlkem/gen_keccak_vh.py` — that imports `RC` and
-`ROTC` from `model/sha3.py` and emits `rtl/crypto/sha3/keccak_rc.vh`. The constants
-then have exactly one source, the frozen model, and the transcription bug becomes
-impossible rather than merely unlikely.
+**Fix:** a short generator — `scripts/gen_keccak_rc.py` — that imports `RC` and
+`ROTC` from `model/sha3.py` and emits `rtl/crypto/sha3/keccak_rc.vh`. (It lives in
+`scripts/`, not `model/mlkem/`, because that path is frozen and write-denied.) The
+constants then have exactly one source, the frozen model, and the transcription bug
+becomes impossible rather than merely unlikely.
 **Cost:** ~30 minutes. **Highest value-per-minute item in the lane.**
+
+**CLEARED — 8 Oct 2026.** Generator written, header generated, `--check` mode wired
+into CI so the header cannot drift from the model. Verified by simulation, not by
+inspection: the packed `KECCAK_RC_FLAT` indexes correctly at both ends
+(`FLAT[64*r +: 64] == RC[r]`), the named constants agree with the packed form, and
+the rotation offsets match `ROTC`. The header is Verilator `-Wall` clean — a scoped
+`lint_off UNUSEDPARAM` is applied, because a shared constants header necessarily
+defines more than any single consumer uses, and without it the header turned the
+lint job red the moment anything included it.
 
 ### 1.2 There are no FIPS 202 vectors in the repository
 
@@ -165,13 +180,15 @@ figures should not appear in any §6.3 table as results.
 
 | # | Item | Why it is here | Cost |
 |---|---|---|---|
-| 1 | 0.1 sim harness + CI sim job | Nothing can be verified; CI is red now | 20 min |
-| 2 | 0.3 RTL directories | `C8` has nowhere to land | 1 min |
-| 3 | 1.1 `keccak_rc.vh` generator | Removes the worst bug class before it exists | 30 min |
-| 4 | 0.2 local simulator | Makes `C8` iteration survivable | 1 hr |
-| 5 | 1.2 FIPS 202 vectors | `C9`'s hard gate is impossible without them | 1 hr |
-| 6 | 1.3 decide cocotb vs Verilog for `C16` | Decide now, cheap; expensive later | 10 min |
-| 7 | — | **Then start `C8`.** | |
+| # | Item | Why it is here | Cost | Status |
+|---|---|---|---|---|
+| 1 | 0.1 sim harness + CI sim job | Nothing can be verified; CI was red | 20 min | **done** |
+| 2 | 0.3 RTL directories | `C8` has nowhere to land | 1 min | **done** |
+| 3 | 1.1 `keccak_rc.vh` generator | Removes the worst bug class before it exists | 30 min | **done** |
+| 4 | 0.2 local simulator | Makes `C8` iteration survivable | 1 hr | open |
+| 5 | 1.2 FIPS 202 vectors | `C9`'s hard gate is impossible without them | 1 hr | open |
+| 6 | 1.3 decide cocotb vs Verilog for `C16` | Decide now, cheap; expensive later | 10 min | open |
+| 7 | — | **Then start `C8`.** | | |
 
 Roughly half a day of debt clearing buys a lane that can actually prove its own
 correctness. Starting `C8` before item 5 means writing a Keccak core that cannot

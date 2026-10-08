@@ -69,6 +69,13 @@ jobs:
       - name: ChaCha20-Poly1305 twin (RFC 8439)
         run: python model/chacha_poly.py
 
+      # keccak_rc.vh is generated from model/sha3.py. If someone hand-edits the
+      # header, or the model's constants change without regenerating, the RTL
+      # and its twin silently disagree on the Keccak round constants -- which
+      # fails FIPS 202 later in a way that is very expensive to localise.
+      - name: Generated Keccak constants match the twin
+        run: python scripts/gen_keccak_rc.py --check
+
   # ----------------------------------------------------------- HARD GATE
   kat:
     name: FIPS 203 KAT gate
