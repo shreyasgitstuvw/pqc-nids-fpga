@@ -57,6 +57,18 @@ jobs:
       - name: ML-KEM-512 round trip + implicit rejection
         run: python model/mlkem/kem.py
 
+      - name: Packet-bus pipeline stub
+        run: python model/pipeline.py
+
+      # These two are the twins every Lane 1 / Lane 2 RTL module is verified
+      # against. Ungated, they can drift or break silently and the RTL would
+      # still "pass" against a broken reference.
+      - name: Detection lane twin (CMS sizing, protocol validator)
+        run: python model/detect.py
+
+      - name: ChaCha20-Poly1305 twin (RFC 8439)
+        run: python model/chacha_poly.py
+
   # ----------------------------------------------------------- HARD GATE
   kat:
     name: FIPS 203 KAT gate
@@ -103,11 +115,20 @@ jobs:
             echo '_No RTL modules committed yet._' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          # Every rtl/ subdirectory is both an include path (-I, for `include)
+          # and a module search path (-y, so a top module can find the submodules
+          # it instantiates). Without -y, linting chacha_poly.v fails hard with
+          # "Cannot find file containing module: 'chacha20'".
+          INCS=""
+          for d in $(find rtl -type d | sort); do
+            INCS="$INCS -I$d -y $d"
+          done
+          echo "Search paths:$INCS"
           echo "Linting ${#files[@]} module(s)…"
           status=0
           for f in "${files[@]}"; do
             echo "── $f"
-            verilator --lint-only -Wall -Irtl/control "$f" || status=1
+            verilator --lint-only -Wall $INCS "$f" || status=1
           done
           exit $status
 
