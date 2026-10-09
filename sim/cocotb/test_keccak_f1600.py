@@ -61,7 +61,7 @@ async def reset_dut(dut):
 
 
 @cocotb.test()
-async def test_zero_state(dut):
+async def zero_state(dut):
     """Fixed test vector: 1600-bit zero state yields lane 0 == 0xF1258F7940E1DDE7."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())  # 100 MHz
     await reset_dut(dut)
@@ -97,7 +97,7 @@ async def test_zero_state(dut):
 
 
 @cocotb.test()
-async def test_random_states(dut):
+async def random_states(dut):
     """Randomized agreement: 50 random 1600-bit inputs compared against model/sha3.py."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -136,7 +136,7 @@ async def test_random_states(dut):
 
 
 @cocotb.test()
-async def test_start_during_busy_ignored(dut):
+async def start_during_busy_ignored(dut):
     """Verify that asserting start while busy=1 is strictly ignored."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -177,7 +177,7 @@ async def test_start_during_busy_ignored(dut):
 
 
 @cocotb.test()
-async def test_back_to_back(dut):
+async def back_to_back(dut):
     """Back-to-back transactions: new start pulse applied immediately when done=1."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)

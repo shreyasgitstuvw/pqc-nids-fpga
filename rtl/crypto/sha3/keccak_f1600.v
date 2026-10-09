@@ -31,6 +31,8 @@
 //       Sourced directly from keccak_rc.vh inside the module scope.
 //==========================================================================
 
+`timescale 1ns / 1ps
+
 module keccak_f1600 (
     input  wire          clk,
     input  wire          rst,       // synchronous active-high reset
