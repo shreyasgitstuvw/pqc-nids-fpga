@@ -167,8 +167,9 @@ port is invisible to you. One-line confirmation, but it needs to be explicit.
 - [x] `C10b` `poly_mul_acc.v` — pointwise multiplication (base_case_multiply mod X^2 - gamma) and accumulation for matrix-vector products (1 DSP48E1, 2,049 cycles measured, 0 lint warnings; pair interleaving recorded as known optimisation)
 - [x] `C11` `test_ntt.py` + `test_modmul.py` + `test_poly_mul_acc.py` — bit-exact vs `model/mlkem/ntt.py` & `model/mlkem/pke.py` (cocotb) · **Phase IV exit**
 - [x] `C12` `cbd_sampler.v`, verified incl. seed handling (dual-window ping-pong, eta1=3 & eta2=2, 259/261 cycles measured, bit-exact vs model/mlkem/pke.py & FIPS 203 KAT) · **Phase IV exit**
-- [ ] `C13` `compress.v` / `decompress.v` · ⛔ waiting on `C10`
-- [ ] `C14` `mlkem_top.v` — keygen / encaps / decaps state machines · ⛔ waiting on `C11`, `C12`, `C13`, `A6`
+- [ ] `C13` `compress.v` / `decompress.v` — streaming datapath for d in {1, 4, 10} · ⛔ waiting on `C10`
+- [ ] `C13b` `byte_encode.v` / `byte_decode.v` — bit packing/unpacking for d in {1, 4, 10} (u, v, and message) · ⛔ waiting on `C13`
+- [ ] `C14` `mlkem_top.v` — keygen / encaps / decaps state machines · ⛔ waiting on `C11`, `C12`, `C13`, `C13b`, `A6`
 - [ ] `C15` `fo_transform.v` — structural signals, cryptographic stays silent · ⛔ waiting on `C14`
 - [ ] `C16` FIPS 203 KAT through `mlkem_top.v` — zero unexplained mismatches · **PHASE V HARD GATE** · ⛔ waiting on `C15`
 - [ ] `C17` Joint Seam-2 indistinguishability test with D · **Phase VI exit** · ⛔ waiting on `C15`, `D8`
