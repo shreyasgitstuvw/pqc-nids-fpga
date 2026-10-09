@@ -301,14 +301,13 @@ async def encode_mid_stream_reset(dut):
     dut.rst.value = 0
     await FallingEdge(dut.clk)
 
-    # Check for 20 cycles that no out_valid occurs
-    idle_cycles = 0
+    # Verify bus remains quiescent post-reset: zero stale out_valid or busy pulses
+    stale_pulses = 0
     for _ in range(20):
         await FallingEdge(dut.clk)
-        assert int(dut.out_valid.value) == 0, f"Stale out_valid asserted after mid-stream reset for D={d}"
-        assert int(dut.busy.value) == 0, f"Busy high after reset for D={d}"
-        idle_cycles += 1
-    assert idle_cycles == 20, f"Checked {idle_cycles} cycles != 20 for D={d}"
+        if int(dut.out_valid.value) != 0 or int(dut.busy.value) != 0:
+            stale_pulses += 1
+    assert stale_pulses == 0, f"Observed {stale_pulses} stale valid/busy pulses post-reset for D={d}"
 
 
 @cocotb.test()
