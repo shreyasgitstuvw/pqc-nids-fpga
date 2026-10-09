@@ -32,6 +32,7 @@ vivado*.backup.log
 *.ghw
 sim_build/
 results.xml
+test_runner.*
 
 # --- OS ---
 .DS_Store
