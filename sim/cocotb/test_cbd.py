@@ -14,7 +14,7 @@
 #   6. random_streams_eta2: 20 random byte streams bit-exact vs sample_poly_cbd(s, 2) & cbd(s)
 #   7. mid_straddle_stalls: random prf_valid gaps during word transitions
 #   8. stream_length_errors: truncated streams trigger err_truncated
-#   9. cycle_count_assertions: tight bounds (283 cycles @ eta=3, 258 cycles @ eta=2)
+#   9. cycle_count_assertions: tight bounds (259 cycles @ eta=2, 261 cycles @ eta=3)
 #  10. kat_integration_test: SHA3-512(d||0x02) -> SHAKE256(sigma||0x00) -> cbd_sampler
 #      -> ntt(s0) == ByteDecode12(dk[0:384]) from FIPS 203 KAT tgId=1 tcId=1.
 #==========================================================================

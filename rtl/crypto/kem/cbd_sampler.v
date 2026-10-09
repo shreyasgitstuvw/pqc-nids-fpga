@@ -19,8 +19,12 @@
 //   - Single-port BRAM write latency:
 //       * eta2 = 2: 259 clock cycles per polynomial (~2.59 us, measured)
 //       * eta1 = 3: 261 clock cycles per polynomial (~2.61 us, measured, 23 cycles of 25-cycle Keccak bubble hidden by ping-pong buffer)
-//     Note for mlkem_top.v (C14): KeyGen/Encaps/Decaps totals assume mlkem_top starts the next PRF
-//     absorb immediately after the last word is taken; otherwise add ~35 cycles per polynomial.
+//     Note for mlkem_top.v (C14):
+//       * mlkem_top must set shake_wrapper squeeze_words to 24 for eta1 (192 bytes)
+//         and 16 for eta2 (128 bytes).
+//       * mlkem_top must overlap the next polynomial's PRF startup (about 35 cycles
+//         absorbing 33-byte seed + N) immediately after the last word is taken from the
+//         current squeeze, to hide the absorb latency; otherwise add ~35 cycles per polynomial.
 //   - DSP48E1: 0 slices
 //   - Slice LUTs: ~160-190 LUTs
 //   - Slice FFs: ~280-320 registers
