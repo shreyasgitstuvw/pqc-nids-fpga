@@ -162,7 +162,7 @@ port is invisible to you. One-line confirmation, but it needs to be explicit.
 - [x] `C7` Push and merge `member-c/python-oracle` into `main` — PR #1 merged, branch deleted
 - [x] `C8` `keccak_f1600.v` + `shake_wrapper.v` — iterative 25-cycle Keccak-f[1600] and multi-mode 64-bit sponge wrapper · verified clean Verilator lint
 - [x] `C9` `test_keccak_f1600.py` + `test_shake_wrapper.py` vs `model/sha3.py` (cocotb) · 100% green in CI
-- [ ] `C9b` FIPS 202 KAT through RTL · **Phase IV exit** · ⛔ waiting on 1.2 (`sim/vectors/fips202_kat/`)
+- [x] `C9b` FIPS 202 KAT through RTL (334 NIST CAVP vectors: SHA3-256, SHA3-512, SHAKE128, SHAKE256 ShortMsg/LongMsg/VariableOut) · **Phase IV exit**
 - [ ] `C10` `ntt_core.v` / `butterfly.v` / `modmul.v` within the ≈8 DSP budget 
 - [ ] `C11` `test_ntt.py` — hundreds of random polys, forward∘inverse = identity · **Phase IV exit** · ⛔ waiting on `C10`
 - [ ] `C12` `cbd_sampler.v`, verified incl. seed handling · **Phase IV exit** · ⛔ waiting on `C9`

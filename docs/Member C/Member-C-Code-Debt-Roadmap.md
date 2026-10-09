@@ -185,9 +185,9 @@ figures should not appear in any §6.3 table as results.
 | 1 | 0.1 sim harness + CI sim job | Nothing can be verified; CI was red | 20 min | **done** |
 | 2 | 0.3 RTL directories | `C8` has nowhere to land | 1 min | **done** |
 | 3 | 1.1 `keccak_rc.vh` generator | Removes the worst bug class before it exists | 30 min | **done** |
-| 4 | 0.2 local simulator | Makes `C8` iteration survivable | 1 hr | open |
-| 5 | 1.2 FIPS 202 vectors | `C9`'s hard gate is impossible without them | 1 hr | open |
-| 6 | 1.3 decide cocotb vs Verilog for `C16` | Decide now, cheap; expensive later | 10 min | open |
+| 4 | 0.2 local simulator | Makes `C8` iteration survivable | 1 hr | **done** (Icarus + Verilator + Python 3.11/cocotb) |
+| 5 | 1.2 FIPS 202 vectors | `C9`'s hard gate is impossible without them | 1 hr | **done** (334 NIST CAVP vectors verified) |
+| 6 | 1.3 decide cocotb vs Verilog for `C16` | Decide now, cheap; expensive later | 10 min | **done** (cocotb runner adopted) |
 | 7 | — | **Then start `C8`.** | | |
 
 Roughly half a day of debt clearing buys a lane that can actually prove its own
