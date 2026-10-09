@@ -377,7 +377,9 @@ async def real_sizes_ek_and_ct(dut):
     await send_message(dut, ek)
     got_ek = await collect_digest(dut, 4)
     end_cyc = cocotb.utils.get_sim_time('ns')
+    cycles_ek = int((end_cyc - start_cyc) / 10)
     assert got_ek == expected_ek_h, "SHA3-256(ek) mismatch"
+    assert cycles_ek <= 300, f"SHA3-256(800B ek) took {cycles_ek} cycles, exceeding bound of 300 cycles"
 
     # 2. SHAKE256 on 768-byte ct: 768 / 136 = 5 full blocks (680B) + 88B in block 6
     ct = bytes([rng.randrange(256) for _ in range(768)])
@@ -390,9 +392,13 @@ async def real_sizes_ek_and_ct(dut):
     await FallingEdge(dut.clk)
     dut.init.value = 0
 
+    start_ct = cocotb.utils.get_sim_time('ns')
     await send_message(dut, ct)
     got_ct = await collect_digest(dut, 4)
+    end_ct = cocotb.utils.get_sim_time('ns')
+    cycles_ct = int((end_ct - start_ct) / 10)
     assert got_ct == expected_ct_k, "SHAKE256(ct) mismatch"
+    assert cycles_ct <= 300, f"SHAKE256(768B ct) took {cycles_ct} cycles, exceeding bound of 300 cycles"
 
 
 @cocotb.test()

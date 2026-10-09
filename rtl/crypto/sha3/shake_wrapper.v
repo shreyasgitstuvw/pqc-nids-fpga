@@ -13,11 +13,11 @@
 //       shake_wrapper owns architectural sponge_state [1599:0].
 //       keccak_f1600 owns transient execution state_reg [1599:0].
 //       On core completion (done), sponge_state snapshots core_dout.
-//   - Combined Resource Totals (keccak_f1600 + shake_wrapper, XC7Z020 @ 100 MHz):
+//   - Combined Resource Totals (keccak_f1600 + shake_wrapper, XC7Z020 @ 100 MHz, estimated, pre-synthesis):
 //       0 DSP slices (100% of DSP budget reserved for NTT/modmul)
 //       0 BRAMs
-//       ~3,270 Slice Registers (~1,607 in core, 1600 sponge_state, ~65 FSM/counters)
-//       ~3,850-4,150 Slice LUTs (~3,000 in core, ~850-1,150 in wrapper)
+//       ~3,270 Slice Registers (~1,607 in core, 1600 sponge_state, ~65 FSM/counters) (estimated, pre-synthesis)
+//       ~3,850-4,150 Slice LUTs (~3,000 in core, ~850-1,150 in wrapper) (estimated, pre-synthesis)
 //   - pad10*1 Boundary Specification:
 //       Rates: 72, 136, 168 bytes are all exact multiples of 8. Words never straddle.
 //       Case A (Partial word): suffix placed at in_bytes, 0x80 at rate_bytes-1.
