@@ -24,6 +24,7 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
+          cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
       # E9 syntax errors, F63/F7 logic errors, F82 undefined names.
       # Deliberately not a style gate -- these are the rules that catch bugs.
@@ -40,6 +41,7 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
+          cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
 
       - name: Keccak / SHA3 / SHAKE vs pycryptodome
@@ -57,6 +59,25 @@ jobs:
       - name: ML-KEM-512 round trip + implicit rejection
         run: python model/mlkem/kem.py
 
+      - name: Packet-bus pipeline stub
+        run: python model/pipeline.py
+
+      # These two are the twins every Lane 1 / Lane 2 RTL module is verified
+      # against. Ungated, they can drift or break silently and the RTL would
+      # still "pass" against a broken reference.
+      - name: Detection lane twin (CMS sizing, protocol validator)
+        run: python model/detect.py
+
+      - name: ChaCha20-Poly1305 twin (RFC 8439)
+        run: python model/chacha_poly.py
+
+      # keccak_rc.vh is generated from model/sha3.py. If someone hand-edits the
+      # header, or the model's constants change without regenerating, the RTL
+      # and its twin silently disagree on the Keccak round constants -- which
+      # fails FIPS 202 later in a way that is very expensive to localise.
+      - name: Generated Keccak constants match the twin
+        run: python scripts/gen_keccak_rc.py --check
+
   # ----------------------------------------------------------- HARD GATE
   kat:
     name: FIPS 203 KAT gate
@@ -68,6 +89,7 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
+          cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
 
       # Phase V exit criterion, per the execution plan: zero unexplained
@@ -103,11 +125,20 @@ jobs:
             echo '_No RTL modules committed yet._' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          # Every rtl/ subdirectory is both an include path (-I, for `include)
+          # and a module search path (-y, so a top module can find the submodules
+          # it instantiates). Without -y, linting chacha_poly.v fails hard with
+          # "Cannot find file containing module: 'chacha20'".
+          INCS=""
+          for d in $(find rtl -type d | sort); do
+            INCS="$INCS -I$d -y $d"
+          done
+          echo "Search paths:$INCS"
           echo "Linting ${#files[@]} module(s)…"
           status=0
           for f in "${files[@]}"; do
             echo "── $f"
-            verilator --lint-only -Wall -Irtl/control "$f" || status=1
+            verilator --lint-only -Wall $INCS "$f" || status=1
           done
           exit $status
 
@@ -122,6 +153,7 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
+          cache-dependency-path: requirements-dev.txt
       - name: Discover testbenches
         id: find
         run: |
@@ -133,6 +165,9 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq iverilog
       - run: pip install -r requirements-dev.txt
         if: steps.find.outputs.count != '0'
+      # Testbenches use cocotb's Python runner (each test_*.py is self-contained
+      # and documents `python sim/cocotb/test_x.py  (or pytest)`), so there is no
+      # Makefile flow to invoke. `make -C sim` pointed at a flow nobody uses.
       - name: Run
         if: steps.find.outputs.count != '0'
-        run: make -C sim
+        run: pytest sim/cocotb/ -q
