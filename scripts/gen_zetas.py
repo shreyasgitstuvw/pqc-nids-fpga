@@ -56,9 +56,6 @@ def render() -> str:
     L.append("// transcription bug the generator exists to prevent.")
     L.append("// -----------------------------------------------------------------------------")
     L.append("")
-    L.append("`ifndef NTT_ZETAS_VH")
-    L.append("`define NTT_ZETAS_VH")
-    L.append("")
     L.append("/* verilator lint_off UNUSEDPARAM */")
     L.append("")
     L.append("// Field modulus and dimension parameters")
@@ -89,8 +86,6 @@ def render() -> str:
     L.append(f"localparam [{128*12-1}:0] NTT_GAMMAS_FLAT = {128*12}'h{gamma_val:0384X};")
     L.append("")
     L.append("/* verilator lint_on UNUSEDPARAM */")
-    L.append("")
-    L.append("`endif // NTT_ZETAS_VH")
     L.append("")
     return "\n".join(L)
 
