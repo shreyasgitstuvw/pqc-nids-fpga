@@ -159,10 +159,20 @@ module shake_wrapper (
     end
 
     // -------------------------------------------------------------------------
+    // Word & Bit Index Helpers (avoids Verilator WIDTHEXPAND in part-selects)
+    // -------------------------------------------------------------------------
+    wire [4:0]  word_idx_plus_1    = word_idx + 5'd1;
+    wire [4:0]  rate_words_minus_1 = rate_words - 5'd1;
+
+    wire [10:0] word_bit_idx       = {word_idx, 6'b000000};
+    wire [10:0] next_bit_idx       = {word_idx_plus_1, 6'b000000};
+    wire [10:0] last_bit_idx       = {rate_words_minus_1, 6'b000000};
+
+    // -------------------------------------------------------------------------
     // Control Outputs & Handshakes
     // -------------------------------------------------------------------------
     assign in_ready  = (fsm_state == S_IDLE_ABSORB) && !init;
-    assign out_data  = sponge_state[64*word_idx +: 64];
+    assign out_data  = sponge_state[word_bit_idx +: 64];
     assign out_mask  = 8'hFF;
     assign out_valid = (fsm_state == S_SQUEEZE);
     assign out_last  = (fsm_state == S_SQUEEZE) && (squeeze_word_ctr + 10'd1 == squeeze_target_reg);
@@ -211,58 +221,58 @@ module shake_wrapper (
                         if (in_valid && in_ready) begin
                             if (!in_last) begin
                                 // Non-last word: must be full 8 bytes
-                                sponge_state[64*word_idx +: 64] <= sponge_state[64*word_idx +: 64] ^ clean_word;
-                                if (word_idx == rate_words - 5'd1) begin
+                                sponge_state[word_bit_idx +: 64] <= sponge_state[word_bit_idx +: 64] ^ clean_word;
+                                if (word_idx == rate_words_minus_1) begin
                                     // Eager permutation on full block (Amendment 4)
                                     word_idx        <= 5'd0;
                                     fsm_state       <= S_TRIGGER_CORE;
                                     next_after_core <= S_IDLE_ABSORB;
                                 end else begin
-                                    word_idx <= word_idx + 5'd1;
+                                    word_idx <= word_idx_plus_1;
                                 end
                             end else begin
                                 // Final word of message (in_last == 1)
                                 if (in_bytes == 4'd0) begin
                                     // Case D: Empty message (b"")
-                                    sponge_state[64*0 +: 64] <= sponge_state[64*0 +: 64] ^ {56'h0, suffix_byte};
-                                    sponge_state[64*(rate_words - 5'd1) +: 64] <=
-                                        sponge_state[64*(rate_words - 5'd1) +: 64] ^ 64'h8000_0000_0000_0000;
+                                    sponge_state[0 +: 64] <= sponge_state[0 +: 64] ^ {56'h0, suffix_byte};
+                                    sponge_state[last_bit_idx +: 64] <=
+                                        sponge_state[last_bit_idx +: 64] ^ 64'h8000_0000_0000_0000;
                                     word_idx        <= 5'd0;
                                     fsm_state       <= S_TRIGGER_CORE;
                                     next_after_core <= S_SQUEEZE;
-                                end else if ((in_bytes == 4'd8) && (word_idx == rate_words - 5'd1)) begin
+                                end else if ((in_bytes == 4'd8) && (word_idx == rate_words_minus_1)) begin
                                     // Case C: Full block deferral (Amendment 4)
-                                    sponge_state[64*word_idx +: 64] <= sponge_state[64*word_idx +: 64] ^ clean_word;
+                                    sponge_state[word_bit_idx +: 64] <= sponge_state[word_bit_idx +: 64] ^ clean_word;
                                     word_idx        <= 5'd0;
                                     fsm_state       <= S_TRIGGER_CORE;
                                     next_after_core <= S_PAD_EXTRA;
-                                end else if (word_idx == rate_words - 5'd1) begin
+                                end else if (word_idx == rate_words_minus_1) begin
                                     // Case B & partial last word: all padding fits in this final word
-                                    sponge_state[64*word_idx +: 64] <=
-                                        sponge_state[64*word_idx +: 64] ^ (clean_word | suffix_pad_word | 64'h8000_0000_0000_0000);
+                                    sponge_state[word_bit_idx +: 64] <=
+                                        sponge_state[word_bit_idx +: 64] ^ (clean_word | suffix_pad_word | 64'h8000_0000_0000_0000);
                                     word_idx        <= 5'd0;
                                     fsm_state       <= S_TRIGGER_CORE;
                                     next_after_core <= S_SQUEEZE;
                                 end else if (in_bytes < 4'd8) begin
                                     // Case A: Partial word ending inside block (word_idx < rate_words - 1)
-                                    sponge_state[64*word_idx +: 64] <=
-                                        sponge_state[64*word_idx +: 64] ^ (clean_word | suffix_pad_word);
-                                    sponge_state[64*(rate_words - 5'd1) +: 64] <=
-                                        sponge_state[64*(rate_words - 5'd1) +: 64] ^ 64'h8000_0000_0000_0000;
+                                    sponge_state[word_bit_idx +: 64] <=
+                                        sponge_state[word_bit_idx +: 64] ^ (clean_word | suffix_pad_word);
+                                    sponge_state[last_bit_idx +: 64] <=
+                                        sponge_state[last_bit_idx +: 64] ^ 64'h8000_0000_0000_0000;
                                     word_idx        <= 5'd0;
                                     fsm_state       <= S_TRIGGER_CORE;
                                     next_after_core <= S_SQUEEZE;
                                 end else begin
                                     // in_bytes == 8 and word_idx < rate_words - 1
-                                    sponge_state[64*word_idx +: 64] <= sponge_state[64*word_idx +: 64] ^ clean_word;
-                                    if (word_idx + 5'd1 == rate_words - 5'd1) begin
-                                        sponge_state[64*(word_idx + 5'd1) +: 64] <=
-                                            sponge_state[64*(word_idx + 5'd1) +: 64] ^ {8'h80, 48'h0, suffix_byte};
+                                    sponge_state[word_bit_idx +: 64] <= sponge_state[word_bit_idx +: 64] ^ clean_word;
+                                    if (word_idx_plus_1 == rate_words_minus_1) begin
+                                        sponge_state[next_bit_idx +: 64] <=
+                                            sponge_state[next_bit_idx +: 64] ^ {8'h80, 48'h0, suffix_byte};
                                     end else begin
-                                        sponge_state[64*(word_idx + 5'd1) +: 64] <=
-                                            sponge_state[64*(word_idx + 5'd1) +: 64] ^ {56'h0, suffix_byte};
-                                        sponge_state[64*(rate_words - 5'd1) +: 64] <=
-                                            sponge_state[64*(rate_words - 5'd1) +: 64] ^ 64'h8000_0000_0000_0000;
+                                        sponge_state[next_bit_idx +: 64] <=
+                                            sponge_state[next_bit_idx +: 64] ^ {56'h0, suffix_byte};
+                                        sponge_state[last_bit_idx +: 64] <=
+                                            sponge_state[last_bit_idx +: 64] ^ 64'h8000_0000_0000_0000;
                                     end
                                     word_idx        <= 5'd0;
                                     fsm_state       <= S_TRIGGER_CORE;
@@ -276,9 +286,9 @@ module shake_wrapper (
                     // S_PAD_EXTRA: Synthesize extra padding block for Case C
                     // ---------------------------------------------------------
                     S_PAD_EXTRA: begin
-                        sponge_state[64*0 +: 64] <= sponge_state[64*0 +: 64] ^ {56'h0, suffix_byte};
-                        sponge_state[64*(rate_words - 5'd1) +: 64] <=
-                            sponge_state[64*(rate_words - 5'd1) +: 64] ^ 64'h8000_0000_0000_0000;
+                        sponge_state[0 +: 64] <= sponge_state[0 +: 64] ^ {56'h0, suffix_byte};
+                        sponge_state[last_bit_idx +: 64] <=
+                            sponge_state[last_bit_idx +: 64] ^ 64'h8000_0000_0000_0000;
                         word_idx        <= 5'd0;
                         fsm_state       <= S_TRIGGER_CORE;
                         next_after_core <= S_SQUEEZE;
@@ -315,13 +325,13 @@ module shake_wrapper (
                                 squeeze_word_ctr <= 10'd0;
                             end else begin
                                 squeeze_word_ctr <= squeeze_word_ctr + 10'd1;
-                                if (word_idx == rate_words - 5'd1) begin
+                                if (word_idx == rate_words_minus_1) begin
                                     // Squeezed full rate block; trigger on-demand permutation
                                     word_idx        <= 5'd0;
                                     fsm_state       <= S_TRIGGER_CORE;
                                     next_after_core <= S_SQUEEZE;
                                 end else begin
-                                    word_idx <= word_idx + 5'd1;
+                                    word_idx <= word_idx_plus_1;
                                 end
                             end
                         end
