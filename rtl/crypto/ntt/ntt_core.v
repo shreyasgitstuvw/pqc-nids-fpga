@@ -18,8 +18,8 @@
 //   - Fully constant-time execution: starts during busy are strictly ignored.
 //
 // Timing & Resource Estimates (XC7Z020 @ 100 MHz, estimated, pre-synthesis):
-//   Forward NTT Latency: ~1,196 clock cycles (~12.0 us)
-//   Inverse INTT Latency: ~1,199 clock cycles (~12.0 us)
+//   Forward NTT Latency: 1,192 clock cycles (~11.9 us, measured)
+//   Inverse INTT Latency: 1,195 clock cycles (~12.0 us, measured)
 //   DSP48E1: 1 slice (inside modmul.v)
 //   BRAMs: 1 RAMB18E1 (internal scratch memory)
 //   Slice LUTs: ~450-520 LUTs total (FSM, address generators, butterfly datapath)

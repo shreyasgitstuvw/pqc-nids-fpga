@@ -10,7 +10,7 @@
 #   3. round_trip_identity: intt(ntt(p)) == p for random polynomials.
 #   4. edge_polynomials: all zeros, all q-1 (3328), alternating (0, 3328), unit impulse.
 #   5. start_while_busy_ignored: start pulse while busy=1 does not disrupt transform.
-#   6. cycle_count_assertions: hard cycle bounds (<= 1200 cycles).
+#   6. cycle_count_assertions: exact cycle assertions (1,192 cycles for Forward NTT, 1,195 cycles for Inverse INTT).
 #==========================================================================
 
 import os
@@ -128,7 +128,7 @@ async def forward_ntt_random(dut):
 
         got, cycles = await execute_transform(dut, ram, poly, MODE_NTT)
 
-        assert cycles <= 1250, f"Forward NTT cycle count regression: took {cycles} cycles (> 1250)"
+        assert cycles == 1190, f"Forward NTT cycle count regression: expected 1190 cycles (1,192 from start edge), got {cycles}"
         for idx in range(N):
             assert 0 <= got[idx] < Q, f"Coefficient {idx} out of range [0, {Q-1}]: got {got[idx]}"
             assert got[idx] == expected[idx], (
@@ -154,7 +154,7 @@ async def inverse_ntt_random(dut):
 
         got, cycles = await execute_transform(dut, ram, poly, MODE_INTT)
 
-        assert cycles <= 1250, f"Inverse INTT cycle count regression: took {cycles} cycles (> 1250)"
+        assert cycles == 1193, f"Inverse INTT cycle count regression: expected 1193 cycles (1,195 from start edge), got {cycles}"
         for idx in range(N):
             assert 0 <= got[idx] < Q, f"Coefficient {idx} out of range [0, {Q-1}]: got {got[idx]}"
             assert got[idx] == expected[idx], (

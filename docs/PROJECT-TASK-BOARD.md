@@ -164,7 +164,7 @@ port is invisible to you. One-line confirmation, but it needs to be explicit.
 - [x] `C9` `test_keccak_f1600.py` + `test_shake_wrapper.py` vs `model/sha3.py` (cocotb) · 100% green in CI
 - [x] `C9b` FIPS 202 KAT through RTL (334 NIST CAVP vectors: SHA3-256, SHA3-512, SHAKE128, SHAKE256 ShortMsg/LongMsg/VariableOut) · **Phase IV exit**
 - [x] `C10` `ntt_core.v` / `butterfly.v` / `modmul.v` within the ≈8 DSP budget (1 DSP48E1, 1 BU, 1,192 fwd / 1,195 inv cycles, 0 lint warnings)
-- [x] `C10b` `poly_mul_acc.v` — pointwise multiplication (base_case_multiply mod X^2 - gamma) and accumulation for matrix-vector products (1 DSP48E1, 2,049 cycles, 0 lint warnings)
+- [x] `C10b` `poly_mul_acc.v` — pointwise multiplication (base_case_multiply mod X^2 - gamma) and accumulation for matrix-vector products (1 DSP48E1, 2,049 cycles measured, 0 lint warnings; pair interleaving recorded as known optimisation)
 - [x] `C11` `test_ntt.py` + `test_modmul.py` + `test_poly_mul_acc.py` — bit-exact vs `model/mlkem/ntt.py` & `model/mlkem/pke.py` (cocotb) · **Phase IV exit**
 - [ ] `C12` `cbd_sampler.v`, verified incl. seed handling · **Phase IV exit** · ⛔ waiting on `C9`
 - [ ] `C13` `compress.v` / `decompress.v` · ⛔ waiting on `C10`
