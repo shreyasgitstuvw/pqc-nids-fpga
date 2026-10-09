@@ -166,7 +166,7 @@ port is invisible to you. One-line confirmation, but it needs to be explicit.
 - [x] `C10` `ntt_core.v` / `butterfly.v` / `modmul.v` within the ≈8 DSP budget (1 DSP48E1, 1 BU, 1,192 fwd / 1,195 inv cycles, 0 lint warnings)
 - [x] `C10b` `poly_mul_acc.v` — pointwise multiplication (base_case_multiply mod X^2 - gamma) and accumulation for matrix-vector products (1 DSP48E1, 2,049 cycles measured, 0 lint warnings; pair interleaving recorded as known optimisation)
 - [x] `C11` `test_ntt.py` + `test_modmul.py` + `test_poly_mul_acc.py` — bit-exact vs `model/mlkem/ntt.py` & `model/mlkem/pke.py` (cocotb) · **Phase IV exit**
-- [ ] `C12` `cbd_sampler.v`, verified incl. seed handling · **Phase IV exit** · ⛔ waiting on `C9`
+- [x] `C12` `cbd_sampler.v`, verified incl. seed handling (dual-window ping-pong, eta1=3 & eta2=2, 259/261 cycles measured, bit-exact vs model/mlkem/pke.py & FIPS 203 KAT) · **Phase IV exit**
 - [ ] `C13` `compress.v` / `decompress.v` · ⛔ waiting on `C10`
 - [ ] `C14` `mlkem_top.v` — keygen / encaps / decaps state machines · ⛔ waiting on `C11`, `C12`, `C13`, `A6`
 - [ ] `C15` `fo_transform.v` — structural signals, cryptographic stays silent · ⛔ waiting on `C14`
