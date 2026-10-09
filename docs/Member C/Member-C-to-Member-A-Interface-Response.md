@@ -277,6 +277,41 @@ one frame keeps `mlkem_top.v`'s input path a simple buffer-until-`eof`.
 
 ---
 
+## 8. §5 — BRAM Budget Request & Decapsulation Polynomial Liveness Table
+
+Member C formally requests an architectural allocation of **6 RAMB36E1 equivalents (approx. 4.3% of the ZedBoard XC7Z020's 140 RAMB36 budget)** for the post-quantum crypto lane.
+
+### 8.1 Why 6 RAMB36E1s? Peak Polynomial Liveness Analysis
+ML-KEM-512 ($k=2$) coefficients are 12-bit integers in $\mathbb{Z}_q$ ($q=3329$). Each 256-coefficient polynomial requires $256 \times 12\text{ bits} = 3,072\text{ bits} = 384\text{ bytes}$.
+During the Fujisaki-Okamoto (FO) transform in Decapsulation (Algorithm 17), the engine must decrypt the ciphertext, recover $m'$, re-encrypt to $(u', v')$, and compare against the original ciphertext $(u, v)$ without early-abort timing leaks.
+
+The table below traces concurrent polynomial liveness across the decapsulation timeline:
+
+| Phase | Operation | Active Polynomials | Live Poly Count | Memory Role |
+|---|---|---|:---:|---|
+| **1. Ingress** | Unpack & Decompress $c = (u, v)$ | $u_0, u_1, v$ | 3 | Input buffers |
+| **2. Decrypt** | Forward NTT on $u$: $\hat{u} = \text{NTT}(u)$ | $\hat{u}_0, \hat{u}_1, v, \text{Scratch}$ | 4 | NTT domain conversion |
+| | Pointwise dot product $\hat{\mathbf{s}}^T \hat{\mathbf{u}}$ | $\hat{u}_0, \hat{u}_1, \hat{s}_0, \hat{s}_1, \hat{w}, v$ | 6 | Secret key multiply |
+| | INTT: $w = \text{INTT}(\hat{w})$ | $w, v, u_0, u_1$ | 4 | Poly subtract $\to m'$ |
+| **3. Re-encrypt** | Sample $y \in \mathbb{Z}_q^2$, $\hat{y} = \text{NTT}(y)$ | $\hat{y}_0, \hat{y}_1, u_0, u_1, v$ | 5 | Ephemeral vector |
+| | Sample matrix $\hat{\mathbf{A}}$ row-by-row | $\hat{y}_0, \hat{y}_1, \hat{A}_{i0}, \hat{A}_{i1}, \text{acc}_i, u_0, u_1, v$ | **8 (PEAK)** | Matrix-vector product |
+| | INTT: $w' = \text{INTT}(\hat{A}^T \hat{y})$ | $w_0', w_1', \hat{y}_0, \hat{y}_1, u_0, u_1, v$ | 7 | Normal domain conversion |
+| | Accumulate errors $e_1, e_2$ | $u_0', u_1', v', u_0, u_1, v$ | 6 | Candidate ciphertext |
+| **4. Verify** | Constant-time compare $(u', v') == (u, v)$ | $u_0', u_1', v', u_0, u_1, v$ | 6 | FO comparison |
+
+### 8.2 BRAM Mapping & Allocation Breakdown
+Although 8 polynomials total only $8 \times 384\text{ B} = 3,072\text{ bytes}$ (which fits in the capacity of 1 RAMB36), dual-port butterfly execution and 3-operand pointwise multiply-accumulate ($\text{acc} \leftarrow A \cdot B + C$) require independent memory ports across concurrent streams.
+
+We partition the storage across independent banks:
+1. **Polynomial Register File (8 independent banks):** 4 $\times$ RAMB36E1 (split as 8 $\times$ RAMB18E1 blocks, each storing one $256 \times 12$-bit polynomial with dedicated Port A/B).
+2. **NTT Ping-Pong Scratch RAM:** 1 $\times$ RAMB18E1 ($0.5 \times$ RAMB36E1) for in-flight butterfly stage swapping.
+3. **Decapsulation Key Storage (secret key $\mathbf{s}$, public key $\hat{\mathbf{t}}$, seeds):** 1 $\times$ RAMB36E1.
+4. **Total Lane Allocation Request:** **5.5 to 6 RAMB36E1 equivalents**.
+
+This guarantees zero port contention and zero pipeline stalls during matrix-vector products, while leaving **$\ge 134$ RAMB36E1 blocks ($> 95\%$ of device BRAM)** for Member A's packet buffers and Member B's detection sketches.
+
+---
+
 *Prepared by Member C against `interface_contract.md` DRAFT. Every measured
 number is reproducible with `python model/mlkem/kat_test.py` and
 `python model/mlkem/opcount.py` from the repo root.*
