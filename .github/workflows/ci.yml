@@ -84,6 +84,9 @@ jobs:
       - name: Hardware Barrett reduction model exhaustive check
         run: python model/modmul_hw.py
 
+      - name: Hardware Compress / Decompress model exhaustive check
+        run: python model/compress_hw.py
+
   # ----------------------------------------------------------- HARD GATE
   kat:
     name: FIPS 203 KAT gate
