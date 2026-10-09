@@ -78,6 +78,12 @@ jobs:
       - name: Generated Keccak constants match the twin
         run: python scripts/gen_keccak_rc.py --check
 
+      - name: Generated NTT twiddle constants match the twin
+        run: python scripts/gen_zetas.py --check
+
+      - name: Hardware Barrett reduction model exhaustive check
+        run: python model/modmul_hw.py
+
   # ----------------------------------------------------------- HARD GATE
   kat:
     name: FIPS 203 KAT gate
