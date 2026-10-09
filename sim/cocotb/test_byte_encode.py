@@ -268,6 +268,11 @@ async def encode_latency_assertions(dut):
     dut.in_data.value = 0
 
     await tracker
+    assert LATENCY_D12 == 6
+    assert LATENCY_D10 == 7
+    assert LATENCY_D4 == 16
+    assert LATENCY_D1 == 64
+    assert TOTAL_CYCLES == 256
     assert first_word_cycle == expected_latency, f"First word cycle {first_word_cycle} != expected {expected_latency} for D={d}"
     assert final_word_cycle == TOTAL_CYCLES, f"Final word cycle {final_word_cycle} != {TOTAL_CYCLES} for D={d}"
 
@@ -297,10 +302,13 @@ async def encode_mid_stream_reset(dut):
     await FallingEdge(dut.clk)
 
     # Check for 20 cycles that no out_valid occurs
+    idle_cycles = 0
     for _ in range(20):
         await FallingEdge(dut.clk)
         assert int(dut.out_valid.value) == 0, f"Stale out_valid asserted after mid-stream reset for D={d}"
         assert int(dut.busy.value) == 0, f"Busy high after reset for D={d}"
+        idle_cycles += 1
+    assert idle_cycles == 20, f"Checked {idle_cycles} cycles != 20 for D={d}"
 
 
 @cocotb.test()
