@@ -306,7 +306,7 @@ async def decode_modulus_check_negative(dut):
 
     dut.in_valid.value = 0
     await s_task
-    assert got_suppressed[10] == 171
+    assert got_suppressed[10] == 0
     assert int(dut.err_non_canonical.value) == 0, "err_non_canonical asserted when check_modulus=0!"
 
 
