@@ -113,7 +113,7 @@ Nobody's guide claims these, which is why none of them exist. Assign them.
 - [ ] `A8` `uart_rx.v` / `uart_tx.v` at 3 Mbaud against 100 MHz
 - [ ] `A9` `crc32.v`, verified bit-for-bit against `zlib.crc32`
 - [ ] `A10` `deframer.v` — multi-packet, truncation, min/max length · unblocked by `A1`
-- [ ] `A12` `model/pipeline.py` header-parsing function (the parser's oracle) · unblocked by `A1`
+- [x] `A12` `model/pipeline.py` header-parsing function (the parser's oracle) · unblocked by `A1` · unblocks `B6`, `A11`
 - [ ] `A11` `parser.v` — Ethernet → IPv4 → TCP/UDP onto the packet bus · **Phase II exit** · ⛔ waiting on `A12`
 - [ ] `A13` cocotb: 20+ packets incl. malformed, RTL ≡ Python · **Phase II exit** · ⛔ waiting on `A11`
 
