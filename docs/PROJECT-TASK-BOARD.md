@@ -69,8 +69,6 @@ Nothing is stopping any of these. If you own one, there is no reason it isn't mo
 | `A4` | A | Decide handshake message direction (`packet_type` `2'b10` for ciphertext) |
 | `A8` | A | `uart_rx.v` / `uart_tx.v` at 3 Mbaud |
 | `A9` | A | `crc32.v` vs `zlib.crc32` |
-| `B1` | B | Read and sign off interface contract v1.0.0 |
-| `B4` | B | Confirm handshake port sits inside CMS monitored space |
 | `B9` | B | `count_min_sketch.v` + `hash_functions.v` RTL |
 | `B10` | B | Curate labeled `cicids2017_subset/` |
 | `C8` | C | `keccak_f1600.v` — first RTL of the crypto lane |
@@ -133,8 +131,8 @@ consuming module, not a preference.
 - [x] `B3` Give A the `count_min_sketch.v` verdict latency · 2 cycles after eof, drop engine strobe-based in contract §6
 - [x] `B5` CMS sizing on paper — dual-sketch (flow w=2048, host w=1024, k=4), 6.0/11.5 BRAM36 tiles (52.2%), analytical bound & noise floor verified in model/detect.py
 - [ ] `B10` Curate labeled `sim/vectors/cicids2017_subset/`
-- [ ] `B1` Read and sign off the interface contract · ⛔ waiting on `A2`, `A3`, `A4`
-- [ ] `B4` Confirm the handshake port sits inside the CMS monitored space · ⛔ waiting on `A5`
+- [x] `B1` Read and sign off the interface contract · signed off v1.1.0 (packet bus headers + §3.1 plaintext stream)
+- [x] `B4` Confirm the handshake port sits inside the CMS monitored space · confirmed (ports 51001/51002 keyed by flow 5-tuple)
 - [x] `B6` `model/detect.py` — validator, CAM and CMS reference + 800-flow collision test landed (commit 70ddb03)
 - [x] `B7` `protocol_validator.v` — combinational header checks (Rules 1–6) complete
 - [ ] `B8` `cam_matcher.v` — 16–32 signatures, 1-cycle match, **reads plaintext stream (contract §3.1), not the packet bus** · ⛔ waiting on `B1`, `D4` (plaintext port names)
