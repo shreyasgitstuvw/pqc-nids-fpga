@@ -111,7 +111,7 @@ Nobody's guide claims these, which is why none of them exist. Assign them.
 - [x] `A1` **Freeze `interface_contract.md`** — v1.0.0 locked · **Phase I exit**
 - [ ] `A8` `uart_rx.v` / `uart_tx.v` at 3 Mbaud against 100 MHz
 - [x] `A9` `crc32.v`, verified bit-for-bit against `zlib.crc32`
-- [ ] `A10` `deframer.v` — multi-packet, truncation, min/max length · unblocked by `A1`
+- [x] `A10` `deframer.v` — multi-packet, truncation, min/max length · completed and verified
 - [x] `A12` `model/pipeline.py` header-parsing function (the parser's oracle) · unblocked by `A1` · unblocks `B6`, `A11`
 - [ ] `A11` `parser.v` — Ethernet → IPv4 → TCP/UDP onto the packet bus · **Phase II exit** · unblocked by `A12`
 - [ ] `A13` cocotb: 20+ packets incl. malformed, RTL ≡ Python · **Phase II exit** · ⛔ waiting on `A11`

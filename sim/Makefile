@@ -20,6 +20,12 @@ ifeq ($(MODULE),test_crc32)
   TOPLEVEL = crc32
 endif
 
+ifeq ($(MODULE),test_deframer)
+  VERILOG_SOURCES = $(CURDIR)/../rtl/ingress/crc32.v $(CURDIR)/../rtl/ingress/deframer.v
+  TOPLEVEL = deframer
+  COMPILE_ARGS += -I$(CURDIR)/../rtl/control
+endif
+
 ifeq ($(MODULE),test_parser)
   VERILOG_SOURCES = $(CURDIR)/../rtl/ingress/parser.v
   TOPLEVEL = parser
