@@ -730,10 +730,29 @@ module tb_parser;
             $display("PASS  [Test 24]: Mid-packet synchronous reset recovery -> PASS");
         end
 
+        repeat (2) @(posedge clk);
+
+        //----------------------------------------------------------------------
+        // Test 25: Zero-Payload TCP Packet with 6B Ethernet Padding (60B frame)
+        //----------------------------------------------------------------------
+        set_eth_header(48'h001122334455, 48'h66778899AABB, 16'h0800);
+        set_ipv4_header(8'h45, 16'd40, 8'd6, 32'hC0A8010A, 32'hC0A80114); // 40 bytes claimed
+        set_tcp_header(16'd12345, 16'd51010, 4'd5, 8'h12); // SYN/ACK
+        for (j = 0; j < 6; j = j + 1) frame_buf[54 + j] = 8'h00; // 6 bytes padding
+
+        send_frame(60);
+
+        if (!parsed_ok || payload_len !== 16'd0 || rx_payload_bytes !== 0) begin
+            $display("ERROR [Test 25]: Padded TCP failed! parsed_ok=%b, rx_bytes=%0d", parsed_ok, rx_payload_bytes);
+            errors = errors + 1;
+        end else begin
+            $display("PASS  [Test 25]: Zero-Payload TCP with 6B Padding -> PASS, padding drained");
+        end
+
         #20;
         if (errors == 0) begin
             $display("==================================================================");
-            $display("SUCCESS: ALL 24 tb_parser CHECKS PASSED BIT-FOR-BIT!");
+            $display("SUCCESS: ALL 25 tb_parser CHECKS PASSED BIT-FOR-BIT!");
             $display("==================================================================");
         end else begin
             $display("FAILURE: %0d error(s) detected in tb_parser!", errors);

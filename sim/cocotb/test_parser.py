@@ -14,7 +14,7 @@ Layers of test:
   9. Malformed TCP data offset (<5), malformed UDP length (<8) -> asserts parsed_ok = 0
  10. TCP with options (data_offset=8 -> 32B header) -> asserts parsed_ok = 1
  11. Zero-payload TCP packet (SYN/ACK) -> asserts parsed_ok = 1, payload_len = 0
- 12. 30 randomized valid and malformed packets
+ 12. Zero-payload TCP packet with Ethernet padding -> asserts parsed_ok = 1, padding drained
 
 Owner: Member A (Ingress, Parser, and Interface Contract)
 """
@@ -172,6 +172,33 @@ async def test_parser_standard_packets(dut):
     assert hdr["packet_type"] == PKT_HANDSHAKE_CT
     assert hdr["payload_len"] == 768
     assert rx_payload == gold_hs_resp.payload
+
+    # 5. TCP with Options (data_offset=8 -> 32B header)
+    raw_tcp_opt = _build_test_packet(tcp_data_offset=8, payload=b"OPTIONS_PAYLOAD")
+    gold_tcp_opt = parse_headers(raw_tcp_opt)
+    rx_payload, hdr = await send_packet(dut, raw_tcp_opt)
+
+    assert hdr["parsed_ok"] == 1
+    assert hdr["l4_length"] == 32
+    assert hdr["payload_len"] == 15
+    assert rx_payload == gold_tcp_opt.payload
+
+    # 6. Zero-Payload TCP Packet (SYN/ACK, 54B)
+    raw_zero_tcp = _build_test_packet(dst_port=PORT_DATA, protocol=6, tcp_flags=0x12, payload=b"")
+    gold_zero = parse_headers(raw_zero_tcp)
+    rx_payload, hdr = await send_packet(dut, raw_zero_tcp)
+
+    assert hdr["parsed_ok"] == 1
+    assert hdr["payload_len"] == 0
+    assert rx_payload == b""
+
+    # 7. Zero-Payload TCP Packet with Ethernet Padding (60B)
+    raw_padded_tcp = raw_zero_tcp + b"\x00" * 6
+    rx_payload, hdr = await send_packet(dut, raw_padded_tcp)
+
+    assert hdr["parsed_ok"] == 1
+    assert hdr["payload_len"] == 0
+    assert rx_payload == b""
 
 
 @cocotb.test()

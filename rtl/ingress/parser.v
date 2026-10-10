@@ -185,7 +185,7 @@ module parser (
 
                 case (state)
                     STATE_IDLE: begin
-                        // Without in_sof, ignore stray bytes
+                        // Awaiting in_sof
                     end
 
                     //----------------------------------------------------------
@@ -209,14 +209,18 @@ module parser (
                             default: ;
                         endcase
 
-                        if (in_eof) begin
+                        if (in_eof && byte_sub_idx < 6'd13) begin
                             // Truncated mid-Ethernet header (<14B)
                             parsed_ok <= 1'b0;
                             hdr_valid <= 1'b1;
                             state     <= STATE_IDLE;
                         end else if (byte_sub_idx == 6'd13) begin
-                            // Ethernet header complete: check EtherType
-                            if (eth_type_comb == 16'h0800) begin
+                            if (in_eof) begin
+                                // Truncated: ended at Ethernet header, no IPv4
+                                parsed_ok <= 1'b0;
+                                hdr_valid <= 1'b1;
+                                state     <= STATE_IDLE;
+                            end else if (eth_type_comb == 16'h0800) begin
                                 byte_sub_idx <= 6'd0;
                                 state        <= STATE_IP;
                             end else begin
@@ -269,26 +273,33 @@ module parser (
                             default: ;
                         endcase
 
-                        if (in_eof) begin
+                        if (in_eof && byte_sub_idx < 6'd19) begin
                             // Truncated mid-IPv4 header (<34B)
                             parsed_ok <= 1'b0;
                             hdr_valid <= 1'b1;
                             state     <= STATE_IDLE;
                         end else if (byte_sub_idx == 6'd19) begin
-                            byte_sub_idx <= 6'd0;
-                            if (ip_ihl_reg > 4'd5) begin
-                                // IPv4 Options present -> drain options
-                                opt_remaining <= (ip_ihl_reg - 4'd5) * 4'd4 - 6'd1;
-                                state         <= STATE_IP_OPT;
-                            end else if (ip_protocol == 8'd6) begin
-                                state <= STATE_TCP;
-                            end else if (ip_protocol == 8'd17) begin
-                                state <= STATE_UDP;
-                            end else begin
-                                // Unsupported L4 protocol
+                            if (in_eof) begin
+                                // Truncated: ended at IPv4 header, missing L4
                                 parsed_ok <= 1'b0;
                                 hdr_valid <= 1'b1;
-                                state     <= STATE_DRAIN;
+                                state     <= STATE_IDLE;
+                            end else begin
+                                byte_sub_idx <= 6'd0;
+                                if (ip_ihl_reg > 4'd5) begin
+                                    // IPv4 Options present -> drain options
+                                    opt_remaining <= (ip_ihl_reg - 4'd5) * 4'd4 - 6'd1;
+                                    state         <= STATE_IP_OPT;
+                                end else if (ip_protocol == 8'd6) begin
+                                    state <= STATE_TCP;
+                                end else if (ip_protocol == 8'd17) begin
+                                    state <= STATE_UDP;
+                                end else begin
+                                    // Unsupported L4 protocol
+                                    parsed_ok <= 1'b0;
+                                    hdr_valid <= 1'b1;
+                                    state     <= STATE_DRAIN;
+                                end
                             end
                         end else begin
                             byte_sub_idx <= byte_sub_idx + 6'd1;
@@ -299,19 +310,25 @@ module parser (
                     // IPv4 Options Skip
                     //----------------------------------------------------------
                     STATE_IP_OPT: begin
-                        if (in_eof) begin
+                        if (in_eof && opt_remaining > 6'd0) begin
                             parsed_ok <= 1'b0;
                             hdr_valid <= 1'b1;
                             state     <= STATE_IDLE;
                         end else if (opt_remaining == 6'd0) begin
-                            byte_sub_idx <= 6'd0;
-                            if (ip_protocol == 8'd6) begin
-                                state <= STATE_TCP;
-                            end else if (ip_protocol == 8'd17) begin
-                                state <= STATE_UDP;
-                            end else begin
+                            if (in_eof) begin
+                                parsed_ok <= 1'b0;
                                 hdr_valid <= 1'b1;
-                                state     <= STATE_DRAIN;
+                                state     <= STATE_IDLE;
+                            end else begin
+                                byte_sub_idx <= 6'd0;
+                                if (ip_protocol == 8'd6) begin
+                                    state <= STATE_TCP;
+                                end else if (ip_protocol == 8'd17) begin
+                                    state <= STATE_UDP;
+                                end else begin
+                                    hdr_valid <= 1'b1;
+                                    state     <= STATE_DRAIN;
+                                end
                             end
                         end else begin
                             opt_remaining <= opt_remaining - 6'd1;
@@ -352,7 +369,7 @@ module parser (
                             default: ;
                         endcase
 
-                        if (in_eof) begin
+                        if (in_eof && byte_sub_idx < 6'd19) begin
                             // Truncated mid-TCP header (<54B)
                             parsed_ok <= 1'b0;
                             hdr_valid <= 1'b1;
@@ -360,8 +377,14 @@ module parser (
                         end else if (byte_sub_idx == 6'd19) begin
                             if (tcp_offset_reg > 4'd5) begin
                                 // TCP Options present
-                                opt_remaining <= (tcp_offset_reg - 4'd5) * 4'd4 - 6'd1;
-                                state         <= STATE_TCP_OPT;
+                                if (in_eof) begin
+                                    parsed_ok <= 1'b0;
+                                    hdr_valid <= 1'b1;
+                                    state     <= STATE_IDLE;
+                                end else begin
+                                    opt_remaining <= (tcp_offset_reg - 4'd5) * 4'd4 - 6'd1;
+                                    state         <= STATE_TCP_OPT;
+                                end
                             end else begin
                                 // Base TCP header complete: latch context & classify
                                 hdr_valid <= 1'b1;
@@ -375,14 +398,26 @@ module parser (
                                     packet_type <= PKT_DATA;
 
                                 // Payload length calculation
-                                if (ip_total_length >= (ip_ihl_bytes + 16'd20))
+                                if (ip_total_length >= (ip_ihl_bytes + 16'd20)) begin
                                     payload_len <= ip_total_length - ip_ihl_bytes - 16'd20;
-                                else begin
+                                    if (in_eof) begin
+                                        if (ip_total_length > (ip_ihl_bytes + 16'd20)) begin
+                                            parsed_ok <= 1'b0; // Truncated payload
+                                        end
+                                        state <= STATE_IDLE;
+                                    end else if (ip_total_length == (ip_ihl_bytes + 16'd20)) begin
+                                        state <= STATE_DRAIN; // Zero payload, drain padding
+                                    end else begin
+                                        state <= STATE_PAYLOAD;
+                                    end
+                                end else begin
                                     payload_len <= 16'd0;
                                     parsed_ok   <= 1'b0;
+                                    if (in_eof)
+                                        state <= STATE_IDLE;
+                                    else
+                                        state <= STATE_DRAIN;
                                 end
-
-                                state <= STATE_PAYLOAD;
                             end
                         end else begin
                             byte_sub_idx <= byte_sub_idx + 6'd1;
@@ -393,7 +428,7 @@ module parser (
                     // TCP Options Skip (up to tcp_offset * 4)
                     //----------------------------------------------------------
                     STATE_TCP_OPT: begin
-                        if (in_eof) begin
+                        if (in_eof && opt_remaining > 6'd0) begin
                             parsed_ok <= 1'b0;
                             hdr_valid <= 1'b1;
                             state     <= STATE_IDLE;
@@ -407,14 +442,26 @@ module parser (
                             else
                                 packet_type <= PKT_DATA;
 
-                            if (ip_total_length >= (ip_ihl_bytes + tcp_hdr_bytes))
+                            if (ip_total_length >= (ip_ihl_bytes + tcp_hdr_bytes)) begin
                                 payload_len <= ip_total_length - ip_ihl_bytes - tcp_hdr_bytes;
-                            else begin
+                                if (in_eof) begin
+                                    if (ip_total_length > (ip_ihl_bytes + tcp_hdr_bytes)) begin
+                                        parsed_ok <= 1'b0;
+                                    end
+                                    state <= STATE_IDLE;
+                                end else if (ip_total_length == (ip_ihl_bytes + tcp_hdr_bytes)) begin
+                                    state <= STATE_DRAIN;
+                                end else begin
+                                    state <= STATE_PAYLOAD;
+                                end
+                            end else begin
                                 payload_len <= 16'd0;
                                 parsed_ok   <= 1'b0;
+                                if (in_eof)
+                                    state <= STATE_IDLE;
+                                else
+                                    state <= STATE_DRAIN;
                             end
-
-                            state <= STATE_PAYLOAD;
                         end else begin
                             opt_remaining <= opt_remaining - 6'd1;
                         end
@@ -442,7 +489,7 @@ module parser (
                         endcase
                         tcp_flags <= 8'h00;
 
-                        if (in_eof) begin
+                        if (in_eof && byte_sub_idx < 6'd7) begin
                             // Truncated mid-UDP header (<42B)
                             parsed_ok <= 1'b0;
                             hdr_valid <= 1'b1;
@@ -458,18 +505,26 @@ module parser (
                             else
                                 packet_type <= PKT_DATA;
 
-                            if (l4_length >= 16'd8)
-                                payload_len <= l4_length - 16'd8;
-                            else begin
+                            if (ip_total_length < (ip_ihl_bytes + 16'd8) || l4_length < 16'd8) begin
                                 payload_len <= 16'd0;
                                 parsed_ok   <= 1'b0;
+                                if (in_eof)
+                                    state <= STATE_IDLE;
+                                else
+                                    state <= STATE_DRAIN;
+                            end else begin
+                                payload_len <= l4_length - 16'd8;
+                                if (in_eof) begin
+                                    if (l4_length > 16'd8) begin
+                                        parsed_ok <= 1'b0; // Truncated payload
+                                    end
+                                    state <= STATE_IDLE;
+                                end else if (l4_length == 16'd8) begin
+                                    state <= STATE_DRAIN; // Zero payload, drain padding
+                                end else begin
+                                    state <= STATE_PAYLOAD;
+                                end
                             end
-
-                            if (ip_total_length < (ip_ihl_bytes + 16'd8)) begin
-                                parsed_ok <= 1'b0;
-                            end
-
-                            state <= STATE_PAYLOAD;
                         end else begin
                             byte_sub_idx <= byte_sub_idx + 6'd1;
                         end
@@ -482,20 +537,22 @@ module parser (
                         out_valid          <= 1'b1;
                         out_data           <= in_data;
                         out_sof            <= (payload_bytes_sent == 16'd0);
-                        out_eof            <= in_eof;
+                        out_eof            <= in_eof || (payload_bytes_sent == payload_len - 16'd1);
                         payload_bytes_sent <= payload_bytes_sent + 16'd1;
 
                         if (in_eof) begin
-                            // Check for cut-off payload vs claimed length
                             if (payload_bytes_sent + 16'd1 < payload_len) begin
-                                parsed_ok <= 1'b0;
+                                parsed_ok <= 1'b0; // Truncated payload
                             end
                             state <= STATE_IDLE;
+                        end else if (payload_bytes_sent == payload_len - 16'd1) begin
+                            // All claimed payload bytes sent; drain any trailing padding
+                            state <= STATE_DRAIN;
                         end
                     end
 
                     //----------------------------------------------------------
-                    // Drain unparsed / malformed packet bytes
+                    // Drain unparsed bytes or trailing Ethernet padding
                     //----------------------------------------------------------
                     STATE_DRAIN: begin
                         if (in_eof) begin
