@@ -17,7 +17,7 @@ Reference:
 
 from dataclasses import dataclass, field
 import struct
-from typing import Tuple
+from typing import Any, Optional, Tuple
 import zlib
 
 # =====================================================================
@@ -137,6 +137,8 @@ def parse_wire_frame(frame: bytes) -> Tuple[bool, int, bytes]:
         return False, RC_FRAME_TIMEOUT, b""
 
     total_len = struct.unpack(">H", frame[:2])[0]
+    if total_len < 6:
+        return False, RC_MALFORMED, b""
     if len(frame) < total_len:
         return False, RC_FRAME_TIMEOUT, b""
 
@@ -192,6 +194,7 @@ def parse_headers(raw: bytes) -> PacketBus:
         return bus
 
     bus.ip_version_ihl = raw[14]
+    version = (bus.ip_version_ihl >> 4) & 0x0F
     ihl = bus.ip_version_ihl & 0x0F
     ihl_bytes = ihl * 4
 
@@ -200,8 +203,8 @@ def parse_headers(raw: bytes) -> PacketBus:
     bus.ip_src_addr = int.from_bytes(raw[26:30], "big")
     bus.ip_dst_addr = int.from_bytes(raw[30:34], "big")
 
-    # Reject IPv4 options (IHL != 5) or truncated header
-    if ihl != 5 or len(raw) < 14 + ihl_bytes:
+    # Reject IPv4 options (IHL != 5), bad version (version != 4), or truncated header
+    if version != 4 or ihl != 5 or len(raw) < 14 + ihl_bytes:
         bus.valid = False
         bus.payload = raw[14 + ihl_bytes:] if len(raw) >= 14 + ihl_bytes else b""
         bus.payload_len = len(bus.payload)
@@ -222,6 +225,14 @@ def parse_headers(raw: bytes) -> PacketBus:
         bus.l4_src_port = int.from_bytes(raw[l4_offset:l4_offset + 2], "big")
         bus.l4_dst_port = int.from_bytes(raw[l4_offset + 2:l4_offset + 4], "big")
         tcp_data_offset = (raw[l4_offset + 12] >> 4) & 0x0F
+        if tcp_data_offset < 5:
+            bus.valid = False
+            bus.l4_length = tcp_data_offset * 4
+            bus.payload = raw[l4_offset:]
+            bus.payload_len = len(bus.payload)
+            bus.data = bus.payload
+            return bus
+
         bus.l4_length = tcp_data_offset * 4  # TCP header length in bytes
         bus.tcp_flags = raw[l4_offset + 13]
         payload_start = l4_offset + bus.l4_length
@@ -238,6 +249,13 @@ def parse_headers(raw: bytes) -> PacketBus:
         bus.l4_dst_port = int.from_bytes(raw[l4_offset + 2:l4_offset + 4], "big")
         bus.l4_length = int.from_bytes(raw[l4_offset + 4:l4_offset + 6], "big")
         bus.tcp_flags = 0x00
+        if bus.l4_length < 8:
+            bus.valid = False
+            bus.payload = raw[l4_offset + 8:]
+            bus.payload_len = len(bus.payload)
+            bus.data = bus.payload
+            return bus
+
         payload_start = l4_offset + 8
 
     else:
@@ -265,8 +283,11 @@ def parse_headers(raw: bytes) -> PacketBus:
     bus.payload_len = len(bus.payload)
     bus.data = bus.payload
 
-    # Truncation check against claimed IP total length
-    if bus.ip_total_length > 0 and len(raw) < 14 + bus.ip_total_length:
+    # Minimum IP total length sanity check
+    min_ip_len = ihl_bytes + (bus.l4_length if bus.ip_protocol == 6 else (8 if bus.ip_protocol == 17 else 0))
+    if bus.ip_total_length > 0 and bus.ip_total_length < min_ip_len:
+        bus.valid = False
+    elif bus.ip_total_length > 0 and len(raw) < 14 + bus.ip_total_length:
         bus.valid = False
     elif bus.ip_protocol in (6, 17) and bus.eth_type == 0x0800 and (bus.ip_version_ihl == 0x45):
         bus.valid = True
@@ -289,12 +310,13 @@ def parse_headers(raw: bytes) -> PacketBus:
 # =====================================================================
 # Threat Lane Classification (interface_contract.md §6 & detect.py)
 # =====================================================================
-def classify(bus: PacketBus) -> Verdict:
+def classify(bus: PacketBus, detector: Optional[Any] = None) -> Verdict:
     """
     Evaluates packet against protocol validator rules (protocol_validator.v).
+    Optionally evaluates against Member B's Threat Lane CMS detector if provided.
     Returns a Verdict struct with fail status and reason code.
     """
-    # 1. Structural Checks (RC_MALFORMED)
+    # 1. Structural Checks (protocol_validator.v -> RC_MALFORMED)
     if not bus.valid:
         return Verdict(fail=True, reason="MALFORMED")
 
@@ -307,16 +329,30 @@ def classify(bus: PacketBus) -> Verdict:
     if bus.ip_protocol not in (6, 17):
         return Verdict(fail=True, reason="MALFORMED")
 
+    if bus.packet_type == PKT_RESERVED:
+        return Verdict(fail=True, reason="MALFORMED")
+
+    # 2. Threat Lane Detection (Count-Min Sketch if hooked)
+    if detector is not None and hasattr(detector, "process_packet"):
+        fail, reason_code, _, _ = detector.process_packet(
+            src_ip=bus.ip_src_addr,
+            dst_ip=bus.ip_dst_addr,
+            dst_port=bus.l4_dst_port,
+            protocol=bus.ip_protocol,
+        )
+        if fail:
+            return Verdict(fail=True, reason=REASON_NAME.get(reason_code, "MALFORMED"))
+
     return Verdict(fail=False, reason="NONE")
 
 
-def process(raw: bytes) -> Tuple[PacketBus, Verdict]:
+def process(raw: bytes, detector: Optional[Any] = None) -> Tuple[PacketBus, Verdict]:
     """
     Full pipeline oracle: raw deframed bytes -> (PacketBus, Verdict).
     Imported and called directly by cocotb testbenches.
     """
     bus = parse_headers(raw)
-    verdict = classify(bus)
+    verdict = classify(bus, detector=detector)
     return bus, verdict
 
 
@@ -334,9 +370,12 @@ def _build_test_packet(
     src_port: int = 12345,
     dst_port: int = 51010,
     tcp_flags: int = 0x18,     # PSH, ACK
+    tcp_data_offset: int = 5,
+    udp_len: Optional[int] = None,
+    ip_total_len: Optional[int] = None,
     payload: bytes = b"HELLO_PQC_NIDS",
 ) -> bytes:
-    """Constructs a test Ethernet/IPv4 packet."""
+    """Constructs a test Ethernet/IPv4 packet for simulation/testing."""
     eth = struct.pack(">6s6sH", dst_mac.to_bytes(6, "big"), src_mac.to_bytes(6, "big"), eth_type)
 
     if eth_type != 0x0800:
@@ -347,17 +386,18 @@ def _build_test_packet(
     ip_header_pad = b"\x00" * max(0, ihl_bytes - 20)
 
     if protocol == 6:
-        l4_hdr_len = 20
-        l4_hdr = struct.pack(">HHIIBBHHH", src_port, dst_port, 100, 200, (5 << 4), tcp_flags, 8192, 0, 0)
+        l4_len = tcp_data_offset * 4
+        tcp_pad = b"\x00" * max(0, l4_len - 20)
+        l4_hdr = struct.pack(">HHIIBBHHH", src_port, dst_port, 100, 200, (tcp_data_offset << 4), tcp_flags, 8192, 0, 0) + tcp_pad
     elif protocol == 17:
-        l4_hdr_len = 8
-        udp_len = 8 + len(payload)
-        l4_hdr = struct.pack(">HHHH", src_port, dst_port, udp_len, 0)
+        l4_len = 8
+        effective_udp_len = udp_len if udp_len is not None else (8 + len(payload))
+        l4_hdr = struct.pack(">HHHH", src_port, dst_port, effective_udp_len, 0)
     else:
-        l4_hdr_len = 0
+        l4_len = 0
         l4_hdr = b""
 
-    total_ip_len = ihl_bytes + l4_hdr_len + len(payload)
+    total_ip_len = ip_total_len if ip_total_len is not None else (ihl_bytes + l4_len + len(payload))
     ip_hdr = struct.pack(
         ">BBHHHBBH4s4s",
         version_ihl,
@@ -380,107 +420,189 @@ def run_self_test() -> None:
     print("Ingress Pipeline (Lane 1/Ingress) -- Header Parser & Oracle Twin")
     print("====================================================================")
 
+    test_count = 0
+
+    def assert_test(name: str, condition: bool, err_msg: str = "") -> None:
+        nonlocal test_count
+        test_count += 1
+        assert condition, f"FAIL on test [{test_count}] {name}: {err_msg}"
+        print(f"  [{test_count:2d}] {name}: PASS")
+
     # 1. Standard TCP Packet
     raw_tcp = _build_test_packet(dst_port=PORT_DATA, protocol=6, payload=b"SESSION_DATA_STREAM")
     bus, verdict = process(raw_tcp)
-    assert bus.valid, "Valid TCP packet marked invalid"
-    assert not verdict.fail, f"Valid TCP packet rejected: {verdict.reason}"
-    assert bus.eth_type == 0x0800, f"Bad eth_type: 0x{bus.eth_type:04X}"
-    assert bus.ip_protocol == 6, f"Bad protocol: {bus.ip_protocol}"
-    assert bus.l4_dst_port == PORT_DATA, f"Bad dst port: {bus.l4_dst_port}"
-    assert bus.packet_type == PKT_DATA, f"Bad packet type: {bus.packet_type}"
-    assert bus.payload == b"SESSION_DATA_STREAM", f"Bad payload: {bus.payload}"
-    assert bus.payload_len == len(b"SESSION_DATA_STREAM")
-    print("  [1] Valid TCP Session Data Packet: PASS")
+    assert_test("Valid TCP Session Data Packet",
+                bus.valid and not verdict.fail and bus.eth_type == 0x0800 and bus.ip_protocol == 6 and
+                bus.l4_dst_port == PORT_DATA and bus.packet_type == PKT_DATA and bus.payload == b"SESSION_DATA_STREAM")
 
     # 2. Standard UDP Packet
     raw_udp = _build_test_packet(dst_port=53, protocol=17, payload=b"DNS_QUERY")
     bus, verdict = process(raw_udp)
-    assert bus.valid, "Valid UDP packet marked invalid"
-    assert not verdict.fail, "Valid UDP packet rejected"
-    assert bus.ip_protocol == 17
-    assert bus.l4_dst_port == 53
-    assert bus.packet_type == PKT_DATA
-    assert bus.payload == b"DNS_QUERY"
-    print("  [2] Valid UDP Packet: PASS")
+    assert_test("Valid UDP Packet",
+                bus.valid and not verdict.fail and bus.ip_protocol == 17 and bus.l4_dst_port == 53 and
+                bus.packet_type == PKT_DATA and bus.payload == b"DNS_QUERY")
 
     # 3. Handshake Init Packet (PORT_HS_INIT: 51001, 800 B ek)
     ek_payload = b"\xAA" * 800
     raw_hs_init = _build_test_packet(dst_port=PORT_HS_INIT, protocol=17, payload=ek_payload)
     bus, verdict = process(raw_hs_init)
-    assert bus.valid
-    assert not verdict.fail
-    assert bus.l4_dst_port == PORT_HS_INIT
-    assert bus.packet_type == PKT_HANDSHAKE_EK, f"Expected PKT_HANDSHAKE_EK, got {bus.packet_type}"
-    assert bus.payload_len == 800
-    assert bus.payload == ek_payload
-    print("  [3] ML-KEM Handshake Init Packet (ek=800B, type=2'b00): PASS")
+    assert_test("ML-KEM Handshake Init Packet (ek=800B, type=2'b00)",
+                bus.valid and not verdict.fail and bus.l4_dst_port == PORT_HS_INIT and
+                bus.packet_type == PKT_HANDSHAKE_EK and bus.payload_len == 800 and bus.payload == ek_payload)
 
     # 4. Handshake Resp Packet (PORT_HS_RESP: 51002, 768 B ct)
     ct_payload = b"\x55" * 768
     raw_hs_resp = _build_test_packet(dst_port=PORT_HS_RESP, protocol=17, payload=ct_payload)
     bus, verdict = process(raw_hs_resp)
-    assert bus.valid
-    assert not verdict.fail
-    assert bus.l4_dst_port == PORT_HS_RESP
-    assert bus.packet_type == PKT_HANDSHAKE_CT, f"Expected PKT_HANDSHAKE_CT, got {bus.packet_type}"
-    assert bus.payload_len == 768
-    assert bus.payload == ct_payload
-    print("  [4] ML-KEM Handshake Resp Packet (ct=768B, type=2'b10): PASS")
+    assert_test("ML-KEM Handshake Resp Packet (ct=768B, type=2'b10)",
+                bus.valid and not verdict.fail and bus.l4_dst_port == PORT_HS_RESP and
+                bus.packet_type == PKT_HANDSHAKE_CT and bus.payload_len == 768 and bus.payload == ct_payload)
 
-    # 5. Non-IPv4 Frame (ARP: 0x0806) -> RC_MALFORMED
+    # 5. Non-IPv4 Frame: ARP (0x0806) -> RC_MALFORMED
     raw_arp = _build_test_packet(eth_type=0x0806, payload=b"\x00" * 28)
     bus, verdict = process(raw_arp)
-    assert not bus.valid
-    assert verdict.fail
-    assert verdict.reason == "MALFORMED", f"Expected MALFORMED, got {verdict.reason}"
-    assert verdict.code == RC_MALFORMED
-    print("  [5] Non-IPv4 Frame Rejection (ARP -> RC_MALFORMED): PASS")
+    assert_test("Non-IPv4 Frame Rejection (ARP -> RC_MALFORMED)",
+                not bus.valid and verdict.fail and verdict.reason == "MALFORMED" and verdict.code == RC_MALFORMED)
 
-    # 6. IPv4 Options Header (IHL=6) -> RC_MALFORMED
+    # 6. Non-IPv4 Frame: IPv6 (0x86DD) -> RC_MALFORMED
+    raw_ipv6 = _build_test_packet(eth_type=0x86DD, payload=b"\x60" + b"\x00" * 39)
+    bus, verdict = process(raw_ipv6)
+    assert_test("Non-IPv4 Frame Rejection (IPv6 -> RC_MALFORMED)",
+                not bus.valid and verdict.fail and verdict.reason == "MALFORMED")
+
+    # 7. Non-IPv4 Frame: LLDP (0x88CC) -> RC_MALFORMED
+    raw_lldp = _build_test_packet(eth_type=0x88CC, payload=b"\x02\x07" * 10)
+    bus, verdict = process(raw_lldp)
+    assert_test("Non-IPv4 Frame Rejection (LLDP -> RC_MALFORMED)",
+                not bus.valid and verdict.fail and verdict.reason == "MALFORMED")
+
+    # 8. IPv4 Version Corruption (version=6 -> RC_MALFORMED)
+    raw_bad_ver = _build_test_packet(version_ihl=0x65, protocol=6)
+    bus, verdict = process(raw_bad_ver)
+    assert_test("IPv4 Corrupted Version Rejection (0x65 -> RC_MALFORMED)",
+                not bus.valid and verdict.fail and verdict.reason == "MALFORMED")
+
+    # 9. IPv4 Underflow IHL < 5 (IHL=4 -> RC_MALFORMED)
+    raw_bad_ihl = _build_test_packet(version_ihl=0x44, protocol=6)
+    bus, verdict = process(raw_bad_ihl)
+    assert_test("IPv4 Bad IHL < 5 Rejection (0x44 -> RC_MALFORMED)",
+                not bus.valid and verdict.fail and verdict.reason == "MALFORMED")
+
+    # 10. IPv4 Options Header (IHL=6 -> RC_MALFORMED)
     raw_opt = _build_test_packet(version_ihl=0x46, payload=b"DATA")
     bus, verdict = process(raw_opt)
-    assert not bus.valid
-    assert verdict.fail
-    assert verdict.reason == "MALFORMED"
-    print("  [6] IPv4 Options Rejection (IHL=6 -> RC_MALFORMED): PASS")
+    assert_test("IPv4 Options Rejection (IHL=6 -> RC_MALFORMED)",
+                not bus.valid and verdict.fail and verdict.reason == "MALFORMED")
 
-    # 7. Unsupported L4 Protocol (ICMP=1) -> RC_MALFORMED
+    # 11. IPv4 Maximum Options Header (IHL=15 -> RC_MALFORMED)
+    raw_max_opt = _build_test_packet(version_ihl=0x4F, payload=b"DATA")
+    bus, verdict = process(raw_max_opt)
+    assert_test("IPv4 Maximum Options Rejection (IHL=15 -> RC_MALFORMED)",
+                not bus.valid and verdict.fail and verdict.reason == "MALFORMED")
+
+    # 12. Unsupported L4 Protocol: ICMP (1) -> RC_MALFORMED
     raw_icmp = _build_test_packet(protocol=1, payload=b"ECHO_REQUEST")
     bus, verdict = process(raw_icmp)
-    assert not bus.valid
-    assert verdict.fail
-    assert verdict.reason == "MALFORMED"
-    print("  [7] Unsupported L4 Protocol Rejection (ICMP -> RC_MALFORMED): PASS")
+    assert_test("Unsupported L4 Protocol Rejection (ICMP -> RC_MALFORMED)",
+                not bus.valid and verdict.fail and verdict.reason == "MALFORMED")
 
-    # 8. Truncated Frame (< 14 bytes) -> RC_MALFORMED
-    short_pkt = b"\x00\x11\x22\x33\x44"
-    bus, verdict = process(short_pkt)
-    assert not bus.valid
-    assert verdict.fail
-    assert verdict.reason == "MALFORMED"
-    print("  [8] Truncated Short Frame (<14B -> RC_MALFORMED): PASS")
+    # 13. Unsupported L4 Protocol: IGMP (2) -> RC_MALFORMED
+    raw_igmp = _build_test_packet(protocol=2, payload=b"MEMBERSHIP_REPORT")
+    bus, verdict = process(raw_igmp)
+    assert_test("Unsupported L4 Protocol Rejection (IGMP -> RC_MALFORMED)",
+                not bus.valid and verdict.fail and verdict.reason == "MALFORMED")
 
-    # 9. Wire Framing & CRC-32 Validation
+    # 14. Unsupported L4 Protocol: GRE (47) -> RC_MALFORMED
+    raw_gre = _build_test_packet(protocol=47, payload=b"GRE_PAYLOAD")
+    bus, verdict = process(raw_gre)
+    assert_test("Unsupported L4 Protocol Rejection (GRE -> RC_MALFORMED)",
+                not bus.valid and verdict.fail and verdict.reason == "MALFORMED")
+
+    # 15. Truncated Frame: Empty (0 bytes) -> RC_MALFORMED
+    bus, verdict = process(b"")
+    assert_test("Truncated Frame: Empty (0 bytes -> RC_MALFORMED)",
+                not bus.valid and verdict.fail and verdict.reason == "MALFORMED")
+
+    # 16. Truncated Frame: Mid-Ethernet (7 bytes) -> RC_MALFORMED
+    bus, verdict = process(b"\x00\x11\x22\x33\x44\x55\x66")
+    assert_test("Truncated Frame: Mid-Ethernet (<14B -> RC_MALFORMED)",
+                not bus.valid and verdict.fail and verdict.reason == "MALFORMED")
+
+    # 17. Truncated Frame: Mid-IPv4 (25 bytes) -> RC_MALFORMED
+    raw_trunc_ip = raw_tcp[:25]
+    bus, verdict = process(raw_trunc_ip)
+    assert_test("Truncated Frame: Mid-IPv4 (<34B -> RC_MALFORMED)",
+                not bus.valid and verdict.fail and verdict.reason == "MALFORMED")
+
+    # 18. Truncated Frame: Mid-TCP Header (40 bytes) -> RC_MALFORMED
+    raw_trunc_tcp = raw_tcp[:40]
+    bus, verdict = process(raw_trunc_tcp)
+    assert_test("Truncated Frame: Mid-TCP Header (<54B -> RC_MALFORMED)",
+                not bus.valid and verdict.fail and verdict.reason == "MALFORMED")
+
+    # 19. Truncated Frame: Cut-off Payload vs Claimed ip_total_length -> RC_MALFORMED
+    raw_cut_payload = raw_tcp[:-10]
+    bus, verdict = process(raw_cut_payload)
+    assert_test("Truncated Payload vs Claimed Length (RC_MALFORMED)",
+                not bus.valid and verdict.fail and verdict.reason == "MALFORMED")
+
+    # 20. Malformed TCP Data Offset (< 5, e.g. 3) -> RC_MALFORMED
+    raw_bad_tcp_offset = _build_test_packet(tcp_data_offset=3, payload=b"DATA")
+    bus, verdict = process(raw_bad_tcp_offset)
+    assert_test("Malformed TCP Data Offset (<5 -> RC_MALFORMED)",
+                not bus.valid and verdict.fail and verdict.reason == "MALFORMED")
+
+    # 21. TCP Options Header (data_offset = 8 -> 32 bytes) -> PASS
+    raw_tcp_opt = _build_test_packet(tcp_data_offset=8, payload=b"OPTIONS_PAYLOAD")
+    bus, verdict = process(raw_tcp_opt)
+    assert_test("TCP with Options (data_offset=8, header=32B -> PASS)",
+                bus.valid and not verdict.fail and bus.l4_length == 32 and bus.payload == b"OPTIONS_PAYLOAD")
+
+    # 22. Malformed UDP Length Field (< 8) -> RC_MALFORMED
+    raw_bad_udp_len = _build_test_packet(protocol=17, udp_len=4, payload=b"DATA")
+    bus, verdict = process(raw_bad_udp_len)
+    assert_test("Malformed UDP Header Length (<8 -> RC_MALFORMED)",
+                not bus.valid and verdict.fail and verdict.reason == "MALFORMED")
+
+    # 23. Wire Framing Round-Trip & CRC-32 Validation
     wire_frame = build_wire_frame(raw_tcp)
     ok, err_code, deframed = parse_wire_frame(wire_frame)
-    assert ok, f"Valid wire frame deframing failed: error {err_code}"
-    assert deframed == raw_tcp, "Deframed payload mismatch"
+    assert_test("Wire Framing Round-Trip & Valid CRC-32",
+                ok and err_code == RC_NONE and deframed == raw_tcp)
 
-    # Corrupt CRC
-    corrupted_crc_frame = wire_frame[:-2] + b"\xFF\xFF"
-    ok, err_code, _ = parse_wire_frame(corrupted_crc_frame)
-    assert not ok
-    assert err_code == RC_CRC_FAIL, f"Expected RC_CRC_FAIL, got {err_code}"
+    # 24. Corrupted Wire Framing CRC-32 -> RC_CRC_FAIL
+    corrupt_wire = wire_frame[:-2] + b"\xDE\xAD"
+    ok, err_code, _ = parse_wire_frame(corrupt_wire)
+    assert_test("Wire Framing Corrupted CRC (RC_CRC_FAIL)",
+                not ok and err_code == RC_CRC_FAIL)
 
-    # Truncate wire frame
-    truncated_wire = wire_frame[:20]
-    ok, err_code, _ = parse_wire_frame(truncated_wire)
-    assert not ok
-    assert err_code == RC_FRAME_TIMEOUT, f"Expected RC_FRAME_TIMEOUT, got {err_code}"
-    print("  [9] Wire Framing & CRC-32 Deframing Checks: PASS")
+    # 25. Wire Framing Truncated (< total_length) -> RC_FRAME_TIMEOUT
+    trunc_wire = wire_frame[:30]
+    ok, err_code, _ = parse_wire_frame(trunc_wire)
+    assert_test("Wire Framing Truncated (RC_FRAME_TIMEOUT)",
+                not ok and err_code == RC_FRAME_TIMEOUT)
 
-    print("\nALL pipeline.py checks passed successfully (0 failures).")
+    # 26. Wire Framing Underflow (< 6 bytes) -> RC_FRAME_TIMEOUT
+    ok, err_code, _ = parse_wire_frame(b"\x00\x04")
+    assert_test("Wire Framing Underflow (<6B -> RC_FRAME_TIMEOUT)",
+                not ok and err_code == RC_FRAME_TIMEOUT)
+
+    # 27. Threat Lane Integration: Optional CMS detector hook
+    class MockCMSDetector:
+        def process_packet(self, src_ip: int, dst_ip: int, dst_port: int, protocol: int):
+            if dst_port == 6666:
+                return True, RC_FLOOD, 600, 10
+            return False, RC_NONE, 1, 1
+
+    detector = MockCMSDetector()
+    raw_benign = _build_test_packet(dst_port=80, protocol=6)
+    raw_flood = _build_test_packet(dst_port=6666, protocol=6)
+    _, v_benign = process(raw_benign, detector=detector)
+    _, v_flood = process(raw_flood, detector=detector)
+    assert_test("Threat Lane Integration (CMS Flood Anomaly Trigger)",
+                not v_benign.fail and v_flood.fail and v_flood.reason == "FLOOD" and v_flood.code == RC_FLOOD)
+
+    print(f"\nALL pipeline.py checks passed successfully ({test_count}/{test_count} tests passed).")
 
 
 if __name__ == "__main__":
