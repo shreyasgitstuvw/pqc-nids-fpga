@@ -45,10 +45,12 @@ module tb_crc32;
     // 100 MHz clock generator (10 ns period)
     always #5 clk = ~clk;
 
-    // Task to send a packet of N bytes and verify the resulting CRC
+    // Storage array for test packets (module-scope for strict Verilog-2001 compatibility)
+    reg [7:0] test_buf [0:63];
+
+    // Task to send a packet of N bytes from test_buf and verify the resulting CRC
     task send_and_check;
         input [8*128-1:0] name;
-        input [7:0]       pkt_bytes [0:63];
         input integer     len;
         input [31:0]      expected_crc;
         integer i;
@@ -56,7 +58,7 @@ module tb_crc32;
             @(posedge clk);
             for (i = 0; i < len; i = i + 1) begin
                 in_valid <= 1'b1;
-                in_data  <= pkt_bytes[i];
+                in_data  <= test_buf[i];
                 init     <= (i == 0) ? 1'b1 : 1'b0;
                 eof      <= (i == len - 1) ? 1'b1 : 1'b0;
                 @(posedge clk);
@@ -77,13 +79,6 @@ module tb_crc32;
         end
     endtask
 
-    // Storage arrays for test packets
-    reg [7:0] pkt_std    [0:63];
-    reg [7:0] pkt_single [0:63];
-    reg [7:0] pkt_zeros  [0:63];
-    reg [7:0] pkt_ones   [0:63];
-    reg [7:0] pkt_hello  [0:63];
-
     initial begin
         clk      = 1'b0;
         rst      = 1'b1;
@@ -103,31 +98,31 @@ module tb_crc32;
         @(posedge clk);
 
         // 1. Published IEEE 802.3 Vector: "123456789"
-        pkt_std[0] = 8'h31; pkt_std[1] = 8'h32; pkt_std[2] = 8'h33;
-        pkt_std[3] = 8'h34; pkt_std[4] = 8'h35; pkt_std[5] = 8'h36;
-        pkt_std[6] = 8'h37; pkt_std[7] = 8'h38; pkt_std[8] = 8'h39;
-        send_and_check("IEEE 802.3 '123456789'", pkt_std, 9, 32'hCBF43926);
+        test_buf[0] = 8'h31; test_buf[1] = 8'h32; test_buf[2] = 8'h33;
+        test_buf[3] = 8'h34; test_buf[4] = 8'h35; test_buf[5] = 8'h36;
+        test_buf[6] = 8'h37; test_buf[7] = 8'h38; test_buf[8] = 8'h39;
+        send_and_check("IEEE 802.3 '123456789'", 9, 32'hCBF43926);
 
         // 2. Single-byte packet: 8'hA5
-        pkt_single[0] = 8'hA5;
-        send_and_check("Single Byte 0xA5", pkt_single, 1, 32'h74BEB8EA);
+        test_buf[0] = 8'hA5;
+        send_and_check("Single Byte 0xA5", 1, 32'h74BEB8EA);
 
         // 3. Four zeros: 4x 8'h00
-        pkt_zeros[0] = 8'h00; pkt_zeros[1] = 8'h00;
-        pkt_zeros[2] = 8'h00; pkt_zeros[3] = 8'h00;
-        send_and_check("Four Zeros 0x00000000", pkt_zeros, 4, 32'h2144DF1C);
+        test_buf[0] = 8'h00; test_buf[1] = 8'h00;
+        test_buf[2] = 8'h00; test_buf[3] = 8'h00;
+        send_and_check("Four Zeros 0x00000000", 4, 32'h2144DF1C);
 
         // 4. Four ones: 4x 8'hFF
-        pkt_ones[0] = 8'hFF; pkt_ones[1] = 8'hFF;
-        pkt_ones[2] = 8'hFF; pkt_ones[3] = 8'hFF;
-        send_and_check("Four Ones 0xFFFFFFFF", pkt_ones, 4, 32'hFFFFFFFF);
+        test_buf[0] = 8'hFF; test_buf[1] = 8'hFF;
+        test_buf[2] = 8'hFF; test_buf[3] = 8'hFF;
+        send_and_check("Four Ones 0xFFFFFFFF", 4, 32'hFFFFFFFF);
 
         // 5. String: "HELLO_PQC_NIDS" (14 bytes)
-        pkt_hello[0]  = "H"; pkt_hello[1]  = "E"; pkt_hello[2]  = "L"; pkt_hello[3]  = "L";
-        pkt_hello[4]  = "O"; pkt_hello[5]  = "_"; pkt_hello[6]  = "P"; pkt_hello[7]  = "Q";
-        pkt_hello[8]  = "C"; pkt_hello[9]  = "_"; pkt_hello[10] = "N"; pkt_hello[11] = "I";
-        pkt_hello[12] = "D"; pkt_hello[13] = "S";
-        send_and_check("HELLO_PQC_NIDS (14B)", pkt_hello, 14, 32'hA9643378);
+        test_buf[0]  = "H"; test_buf[1]  = "E"; test_buf[2]  = "L"; test_buf[3]  = "L";
+        test_buf[4]  = "O"; test_buf[5]  = "_"; test_buf[6]  = "P"; test_buf[7]  = "Q";
+        test_buf[8]  = "C"; test_buf[9]  = "_"; test_buf[10] = "N"; test_buf[11] = "I";
+        test_buf[12] = "D"; test_buf[13] = "S";
+        send_and_check("HELLO_PQC_NIDS (14B)", 14, 32'hA9643378);
 
         // 6. Back-to-Back packets test (no idle cycles between packet A and B)
         @(posedge clk);
@@ -171,8 +166,8 @@ module tb_crc32;
         in_valid <= 1'b0; init <= 1'b0; eof <= 1'b0; in_data <= 8'h00;
         @(posedge clk);
         // Verify fresh packet calculates correctly after reset
-        pkt_single[0] = 8'hA5;
-        send_and_check("Post-Reset Clean 0xA5", pkt_single, 1, 32'h74BEB8EA);
+        test_buf[0] = 8'hA5;
+        send_and_check("Post-Reset Clean 0xA5", 1, 32'h74BEB8EA);
 
         #20;
         if (errors == 0) begin

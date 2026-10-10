@@ -16,17 +16,17 @@ MODULE ?= test_crc32
 
 # Map module to RTL toplevel and source files
 ifeq ($(MODULE),test_crc32)
-  VERILOG_SOURCES = $(PWD)/../rtl/ingress/crc32.v
+  VERILOG_SOURCES = $(CURDIR)/../rtl/ingress/crc32.v
   TOPLEVEL = crc32
 endif
 
 ifeq ($(MODULE),test_parser)
-  VERILOG_SOURCES = $(PWD)/../rtl/ingress/parser.v
+  VERILOG_SOURCES = $(CURDIR)/../rtl/ingress/parser.v
   TOPLEVEL = parser
 endif
 
 # Tell cocotb where to find testbench Python files
-PYTHONPATH := $(PWD)/cocotb:$(PWD)/..:$(PYTHONPATH)
+PYTHONPATH := $(CURDIR)/cocotb:$(CURDIR)/..:$(PYTHONPATH)
 export PYTHONPATH
 
 # Include cocotb's standard Makefile rules if available
