@@ -32,6 +32,12 @@ ifeq ($(MODULE),test_parser)
   COMPILE_ARGS += -I$(CURDIR)/../rtl/control
 endif
 
+ifeq ($(MODULE),test_uart)
+  VERILOG_SOURCES = $(CURDIR)/../rtl/ingress/uart_rx.v $(CURDIR)/../rtl/ingress/uart_tx.v
+  TOPLEVEL = tb_uart
+  COMPILE_ARGS += -I$(CURDIR)/../rtl/control
+endif
+
 # Tell cocotb where to find testbench Python files
 PYTHONPATH := $(CURDIR)/cocotb:$(CURDIR)/..:$(PYTHONPATH)
 export PYTHONPATH

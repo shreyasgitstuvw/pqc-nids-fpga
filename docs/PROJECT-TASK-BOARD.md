@@ -109,7 +109,7 @@ Nobody's guide claims these, which is why none of them exist. Assign them.
 - [x] `A6` Review and adopt `rtl/control/reason_codes.vh` (drafted by C) · adopted and signed off
 - [x] `A7` Strobe-based drop-engine sync (latency-agnostic by construction) + target latencies · locked in §6
 - [x] `A1` **Freeze `interface_contract.md`** — v1.0.0 locked · **Phase I exit**
-- [ ] `A8` `uart_rx.v` / `uart_tx.v` at 3 Mbaud against 100 MHz
+- [x] `A8` `uart_rx.v` / `uart_tx.v` at 3 Mbaud against 100 MHz · completed and verified
 - [x] `A9` `crc32.v`, verified bit-for-bit against `zlib.crc32`
 - [x] `A10` `deframer.v` — multi-packet, truncation, min/max length · completed and verified
 - [x] `A12` `model/pipeline.py` header-parsing function (the parser's oracle) · unblocked by `A1` · unblocks `B6`, `A11`
