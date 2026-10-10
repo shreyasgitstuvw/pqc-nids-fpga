@@ -168,8 +168,11 @@ port is invisible to you. One-line confirmation, but it needs to be explicit.
 - [x] `C11` `test_ntt.py` + `test_modmul.py` + `test_poly_mul_acc.py` — bit-exact vs `model/mlkem/ntt.py` & `model/mlkem/pke.py` (cocotb) · **Phase IV exit**
 - [x] `C12` `cbd_sampler.v`, verified incl. seed handling (dual-window ping-pong, eta1=3 & eta2=2, 259/261 cycles measured, bit-exact vs model/mlkem/pke.py & FIPS 203 KAT) · **Phase IV exit**
 - [x] `C13` `compress.v` / `decompress.v` — streaming datapath for d in {1, 4, 10} (CSD shift-add, L=3/L=1 cycles, 0 DSP, bit-exact vs model/mlkem/pke.py) · **Phase IV exit**
-- [ ] `C13b` `byte_encode.v` / `byte_decode.v` — bit packing/unpacking for d in {1, 4, 10} (u, v, and message) · ⛔ waiting on `C13`
-- [ ] `C14` `mlkem_top.v` — keygen / encaps / decaps state machines · ⛔ waiting on `C11`, `C12`, `C13`, `C13b`, `A6`
+- [x] `C13b` `byte_encode.v` / `byte_decode.v` — bit packing/unpacking for d in {1, 4, 10, 12} (u, v, message, and uncompressed coefficients/keys; 256 cycles/poly, valid/ready 64-bit word stream) · **Phase IV exit**
+- [x] `C13c` `pack_8_to_64.v` — 8-bit ek/dk/ciphertext source -> 64-bit words · bridges byte-wide packet bus to `byte_decode.v`
+- [ ] `C13d` `sample_ntt.v` — SHAKE128 rejection sampler for matrix Â (FIPS 203 Alg. 7, 12-bit candidates mod q) · blocks `C14`
+- [ ] `C13e` `poly_add_sub.v` — coefficient-wise modular add/sub mod q=3329 (L=1 cycle streaming datapath) · blocks `C14`
+- [ ] `C14` `mlkem_top.v` — keygen / encaps / decaps state machines · ⛔ waiting on `C11`, `C12`, `C13`, `C13b`, `C13c`, `C13d`, `C13e`, `A6`
 - [ ] `C15` `fo_transform.v` — structural signals, cryptographic stays silent · ⛔ waiting on `C14`
 - [ ] `C16` FIPS 203 KAT through `mlkem_top.v` — zero unexplained mismatches · **PHASE V HARD GATE** · ⛔ waiting on `C15`
 - [ ] `C17` Joint Seam-2 indistinguishability test with D · **Phase VI exit** · ⛔ waiting on `C15`, `D8`
