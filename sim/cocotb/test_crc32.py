@@ -126,3 +126,23 @@ async def test_crc32_edge_cases(dut):
 
     got_b = await drive_packet(dut, p_b)
     assert got_b == compute_crc32(p_b), f"Back-to-back packet B mismatch: {got_b:08X} != {compute_crc32(p_b):08X}"
+
+    # Reset mid-packet recovery
+    p_interrupted = b"HALF_PACKET"
+    for i in range(5):
+        dut.in_valid.value = 1
+        dut.in_data.value = p_interrupted[i]
+        dut.init.value = 1 if i == 0 else 0
+        dut.eof.value = 0
+        await RisingEdge(dut.clk)
+    dut.rst.value = 1
+    await RisingEdge(dut.clk)
+    dut.rst.value = 0
+    dut.in_valid.value = 0
+    await RisingEdge(dut.clk)
+
+    # Immediately send a fresh packet and check it matches oracle
+    p_fresh = b"CLEAN_PACKET_AFTER_RESET"
+    got_fresh = await drive_packet(dut, p_fresh)
+    assert got_fresh == compute_crc32(p_fresh), f"Post-reset mismatch: {got_fresh:08X} != {compute_crc32(p_fresh):08X}"
+
