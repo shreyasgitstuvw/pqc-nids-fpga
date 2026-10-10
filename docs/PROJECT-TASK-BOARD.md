@@ -170,7 +170,7 @@ port is invisible to you. One-line confirmation, but it needs to be explicit.
 - [x] `C13` `compress.v` / `decompress.v` — streaming datapath for d in {1, 4, 10} (CSD shift-add, L=3/L=1 cycles, 0 DSP, bit-exact vs model/mlkem/pke.py) · **Phase IV exit**
 - [x] `C13b` `byte_encode.v` / `byte_decode.v` — bit packing/unpacking for d in {1, 4, 10, 12} (u, v, message, and uncompressed coefficients/keys; 256 cycles/poly, valid/ready 64-bit word stream) · **Phase IV exit**
 - [x] `C13c` `pack_8_to_64.v` — 8-bit ek/dk/ciphertext source -> 64-bit words · bridges byte-wide packet bus to `byte_decode.v`
-- [ ] `C13d` `sample_ntt.v` — SHAKE128 rejection sampler for matrix Â (FIPS 203 Alg. 7, 12-bit candidates mod q) · blocks `C14`
+- [x] `C13d` `sample_ntt.v` — SHAKE128 rejection sampler for matrix Â (FIPS 203 Alg. 7, 12-bit candidates mod q) · verified clean Verilator lint and cocotb bit-exact
 - [ ] `C13e` `poly_add_sub.v` — coefficient-wise modular add/sub mod q=3329 (L=1 cycle streaming datapath) · blocks `C14`
 - [ ] `C14` `mlkem_top.v` — keygen / encaps / decaps state machines · ⛔ waiting on `C11`, `C12`, `C13`, `C13b`, `C13c`, `C13d`, `C13e`, `A6`
 - [ ] `C15` `fo_transform.v` — structural signals, cryptographic stays silent · ⛔ waiting on `C14`
