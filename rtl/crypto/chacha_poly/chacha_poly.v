@@ -206,6 +206,12 @@ module chacha_poly (
     assign tag_ok  = poly_tag_ok;
 
     // Helper to zero-pad AAD to 16 bytes
+    // NOTE: the BLKSEQ lint check fires on blocking assignments inside a function
+    // that is called from a clocked process. Verilog *requires* blocking
+    // assignments to function-local variables — a non-blocking assignment here
+    // would not compile — so this is a false positive, not a sim/synth hazard.
+    // Scoped lint_off rather than relaxing -Wall repo-wide.
+    /* verilator lint_off BLKSEQ */
     function [127:0] pad_aad;
         input [127:0] in_data;
         input [4:0]   in_len;
@@ -239,6 +245,7 @@ module chacha_poly (
             pad_chunk = p;
         end
     endfunction
+    /* verilator lint_on BLKSEQ */
 
     // =========================================================================
     // Control & Coordination FSM

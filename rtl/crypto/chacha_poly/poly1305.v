@@ -114,6 +114,12 @@ module poly1305 (
     // =========================================================================
     // Construct 129-bit n from buffer bytes (little-endian + append 0x01 byte)
     // =========================================================================
+    // NOTE: the BLKSEQ lint check fires on blocking assignments inside a function
+    // that is called from a clocked process. Verilog *requires* blocking
+    // assignments to function-local variables — a non-blocking assignment here
+    // would not compile — so this is a false positive, not a sim/synth hazard.
+    // Scoped lint_off rather than relaxing -Wall repo-wide.
+    /* verilator lint_off BLKSEQ */
     function [128:0] build_n;
         input [4:0] len;
         input [7:0] in_byte;
@@ -133,6 +139,7 @@ module poly1305 (
             build_n = {1'b0, bdata} | pad_bit;
         end
     endfunction
+    /* verilator lint_on BLKSEQ */
 
     // =========================================================================
     // Sequential Control Logic
