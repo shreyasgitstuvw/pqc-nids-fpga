@@ -173,11 +173,11 @@ module uart_tx #(
                             tx_shift      <= tx_data;
                             tx_busy       <= 1'b1;
                             tx_pin        <= 1'b0; // Immediate start bit for next frame
-                            target_cycles <= get_bit_period(frac_acc);
-                            if (frac_acc + REMAINDER >= BAUD_RATE)
-                                frac_acc <= frac_acc + REMAINDER - BAUD_RATE;
+                            target_cycles <= get_bit_period(32'd0);
+                            if (REMAINDER >= BAUD_RATE)
+                                frac_acc <= REMAINDER - BAUD_RATE;
                             else
-                                frac_acc <= frac_acc + REMAINDER;
+                                frac_acc <= REMAINDER;
 
                             state <= STATE_START;
                         end else begin

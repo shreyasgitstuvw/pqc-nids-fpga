@@ -151,7 +151,7 @@ module tb_uart;
         begin : timing_check
             integer start_cycle, elapsed_cycles;
             @(posedge clk);
-            tx_data  <= 8'h55; // Alternating 01010101
+            tx_data  <= 8'h55; // Alternating 01010101: D0=1, D1=0, D2=1
             tx_valid <= 1'b1;
             @(posedge clk);
             tx_valid <= 1'b0;
@@ -160,9 +160,11 @@ module tb_uart;
             while (tx_pin !== 1'b0) @(posedge clk);
             start_cycle = $time / 10; // 10 ns clock
 
-            // Wait for 3 bits: Start bit (0) + D0 (1) + D1 (0) -> D2 begins
-            // At start of D2, elapsed cycles from start bit must be exactly 100!
-            repeat (100) @(posedge clk);
+            // Trace actual pin transitions across 3 bits:
+            // Start bit (0): 33 cycles -> D0 (1): 33 cycles -> D1 (0): 34 cycles -> D2 (1) rises at cycle 100!
+            while (tx_pin !== 1'b1) @(posedge clk); // D0 rises
+            while (tx_pin !== 1'b0) @(posedge clk); // D1 falls
+            while (tx_pin !== 1'b1) @(posedge clk); // D2 rises
             elapsed_cycles = ($time / 10) - start_cycle;
 
             if (elapsed_cycles == 100) begin
@@ -206,36 +208,46 @@ module tb_uart;
         $display("[Test 5] Framing Error Detection...");
         begin : framing_err_test
             integer i;
+            reg frame_err_seen;
+            frame_err_seen = 1'b0;
             rx_pin_mux = 1'b1;
             @(posedge clk);
 
             // Manual frame injection: Byte 0x55 with corrupted stop bit (0 instead of 1)
             // Start bit (33 cycles low)
             rx_pin_mux = 1'b0;
-            repeat (33) @(posedge clk);
+            repeat (33) begin
+                @(posedge clk);
+                if (frame_err) frame_err_seen = 1'b1;
+            end
 
             // 8 Data bits (alternating 1 and 0)
             for (i = 0; i < 8; i = i + 1) begin
                 rx_pin_mux = (i % 2 == 0) ? 1'b1 : 1'b0;
-                repeat (33) @(posedge clk);
+                repeat (33) begin
+                    @(posedge clk);
+                    if (frame_err) frame_err_seen = 1'b1;
+                end
             end
 
             // Corrupted Stop bit: drive LOW for 34 cycles
             rx_pin_mux = 1'b0;
-            repeat (34) @(posedge clk);
+            repeat (34) begin
+                @(posedge clk);
+                if (frame_err) frame_err_seen = 1'b1;
+            end
 
-            // Check that frame_err was pulsed and rx_valid was suppressed
-            if (frame_err == 1'b1 || u_rx.frame_err == 1'b1) begin
+            // Additional 10 cycles observation
+            repeat (10) begin
+                @(posedge clk);
+                if (frame_err) frame_err_seen = 1'b1;
+            end
+
+            if (frame_err_seen == 1'b1) begin
                 $display("  PASS: frame_err asserted on corrupted stop bit");
             end else begin
-                // Give a few cycles to check
-                repeat (5) @(posedge clk);
-                if (frame_err == 1'b1) begin
-                    $display("  PASS: frame_err asserted on corrupted stop bit");
-                end else begin
-                    $display("  FAIL: frame_err was NOT asserted on missing stop bit!");
-                    errors = errors + 1;
-                end
+                $display("  FAIL: frame_err was NOT asserted on missing stop bit!");
+                errors = errors + 1;
             end
 
             rx_pin_mux = 1'b1; // Restore idle line
