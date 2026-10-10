@@ -69,7 +69,6 @@ Nothing is stopping any of these. If you own one, there is no reason it isn't mo
 | `A4` | A | Decide handshake message direction (`packet_type` `2'b10` for ciphertext) |
 | `A8` | A | `uart_rx.v` / `uart_tx.v` at 3 Mbaud |
 | `A9` | A | `crc32.v` vs `zlib.crc32` |
-| `B9` | B | `count_min_sketch.v` + `hash_functions.v` RTL |
 | `B10` | B | Curate labeled `cicids2017_subset/` |
 | `C8` | C | `keccak_f1600.v` — first RTL of the crypto lane |
 | `C10` | C | `ntt_core.v` / `butterfly.v` / `modmul.v` |
@@ -136,7 +135,7 @@ consuming module, not a preference.
 - [x] `B6` `model/detect.py` — validator, CAM and CMS reference + 800-flow collision test landed (commit 70ddb03)
 - [x] `B7` `protocol_validator.v` — combinational header checks (Rules 1–6) complete
 - [ ] `B8` `cam_matcher.v` — 16–32 signatures, 1-cycle match, **reads plaintext stream (contract §3.1), not the packet bus** · ⛔ waiting on `B1`, `D4` (plaintext port names)
-- [ ] `B9` `count_min_sketch.v` + `hash_functions.v` · unblocked by `B5`, `B6`
+- [x] `B9` `count_min_sketch.v` + `hash_functions.v` · dual-sketch BRAM pipeline verified bit-exact vs model/detect.py (8 cocotb tests pass)
 - [ ] `B11` Measure false-positive rate on replay vs analytical bound · **Phase III exit** · ⛔ waiting on `B9`, `B10`
 - [ ] `B12` All three detectors emit `{fail, reason_code}` per contract · **Phase III exit** · ⛔ waiting on `B7`, `B8`, `B9`, `D7`
 
