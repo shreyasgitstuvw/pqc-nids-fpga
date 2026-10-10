@@ -136,7 +136,7 @@ consuming module, not a preference.
 - [ ] `B1` Read and sign off the interface contract · ⛔ waiting on `A2`, `A3`, `A4`
 - [ ] `B4` Confirm the handshake port sits inside the CMS monitored space · ⛔ waiting on `A5`
 - [x] `B6` `model/detect.py` — validator, CAM and CMS reference + 800-flow collision test landed (commit 70ddb03)
-- [ ] `B7` `protocol_validator.v` — combinational header checks · ⛔ waiting on `B1`
+- [x] `B7` `protocol_validator.v` — combinational header checks (Rules 1–6) complete
 - [ ] `B8` `cam_matcher.v` — 16–32 signatures, 1-cycle match, **reads plaintext stream (contract §3.1), not the packet bus** · ⛔ waiting on `B1`, `D4` (plaintext port names)
 - [ ] `B9` `count_min_sketch.v` + `hash_functions.v` · unblocked by `B5`, `B6`
 - [ ] `B11` Measure false-positive rate on replay vs analytical bound · **Phase III exit** · ⛔ waiting on `B9`, `B10`
