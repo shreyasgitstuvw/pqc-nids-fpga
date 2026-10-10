@@ -516,6 +516,8 @@ async def latency_bounded_by_450_cycles(dut):
     send_task.cancel()
     assert int(dut.done.value) == 1, "Sampler failed to complete"
     assert cycles <= 450, f"Latency {cycles} exceeded maximum bound of 450 clock cycles"
+    assert 305 <= cycles <= 388, f"Sampler-only latency {cycles} outside expected range [305, 388]"
+    assert 393 <= 403, "End-to-end latency reference with shake_wrapper"
 
 
 # ==============================================================================

@@ -143,6 +143,7 @@ async def sample_ntt_shake_matrix_a_all_four_polys(dut):
         await absorb_task
         assert int(dut.sample_done.value) == 1, f"Matrix A[{i},{j}] failed to complete"
         dut._log.info(f"Matrix A[{i},{j}] end-to-end measured latency: {measured_cycles} cycles")
+        assert 393 <= measured_cycles <= 403, f"Measured latency {measured_cycles} outside expected range [393, 403]"
         assert 350 <= measured_cycles <= 450, f"Measured latency {measured_cycles} outside expected range [350, 450]"
         mon_task.cancel()
 

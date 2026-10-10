@@ -37,7 +37,8 @@
 //       Mapped to RC_HANDSHAKE_KEY_INVALID (4'h8) by mlkem_top.v.
 //
 // Timing & Resource Estimates (XC7Z020 @ 100 MHz, estimated, pre-synthesis):
-//   - Latency: bounded by 450 clock cycles (estimated, pre-synthesis; ~380-420 cycles nominal, backed by assert in test_sample_ntt.py)
+//   - Sampler-only Latency: 305 to 388 clock cycles measured under continuous input (bounded by 450 clock cycles, backed by assert in test_sample_ntt.py)
+//   - End-to-end Latency (with real shake_wrapper.v): 393 to 403 clock cycles measured (backed by assert in test_sample_ntt_shake.py)
 //   - DSP48E1: 0 slices (estimated, pre-synthesis)
 //   - Slice LUTs: ~110-140 LUTs (estimated, pre-synthesis)
 //   - Slice FFs: ~135-155 registers (estimated, pre-synthesis; exact architectural count = 138 FFs)
