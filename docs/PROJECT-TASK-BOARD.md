@@ -68,7 +68,6 @@ Nothing is stopping any of these. If you own one, there is no reason it isn't mo
 | `A3` | A | Replace `HANDSHAKE_REJECT` → `HANDSHAKE_KEY_INVALID`, add the no-verdict rule |
 | `A4` | A | Decide handshake message direction (`packet_type` `2'b10` for ciphertext) |
 | `A8` | A | `uart_rx.v` / `uart_tx.v` at 3 Mbaud |
-| `A9` | A | `crc32.v` vs `zlib.crc32` |
 | `B2` | B | FLOOD/SCAN — separate codes or one, tell A |
 | `B3` | B | CMS verdict latency → A |
 | `B5` | B | CMS sizing: k, w, (ε,δ) against ≈11.5 of 140 BRAMs |
@@ -83,8 +82,8 @@ Nothing is stopping any of these. If you own one, there is no reason it isn't mo
 **`D7` is the highest-value one left here** — the drop-engine stub is an afternoon's work and it
 unblocks `B12`. `C8`/`C10` are now unblocked too, since `C7` merged.
 
-Landed since this board was written: `P1` (CI), `P2` (`model/pipeline.py`), `P3` (`demo/` skeleton),
-`C7` (merge).
+Landed since this board was written: `P1` (CI), `P2`/`A12` (`model/pipeline.py`), `P3` (`demo/` skeleton),
+`C7` (merge), `A9` (`crc32.v`).
 
 ---
 
