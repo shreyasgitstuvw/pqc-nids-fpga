@@ -29,6 +29,7 @@ endif
 ifeq ($(MODULE),test_parser)
   VERILOG_SOURCES = $(CURDIR)/../rtl/ingress/parser.v
   TOPLEVEL = parser
+  COMPILE_ARGS += -I$(CURDIR)/../rtl/control
 endif
 
 # Tell cocotb where to find testbench Python files
