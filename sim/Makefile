@@ -33,8 +33,8 @@ ifeq ($(MODULE),test_parser)
 endif
 
 ifeq ($(MODULE),test_uart)
-  VERILOG_SOURCES = $(CURDIR)/../rtl/ingress/uart_rx.v $(CURDIR)/../rtl/ingress/uart_tx.v
-  TOPLEVEL = tb_uart
+  VERILOG_SOURCES = $(CURDIR)/../rtl/ingress/uart_rx.v $(CURDIR)/../rtl/ingress/uart_tx.v $(CURDIR)/uart_loopback.v
+  TOPLEVEL = uart_loopback
   COMPILE_ARGS += -I$(CURDIR)/../rtl/control
 endif
 

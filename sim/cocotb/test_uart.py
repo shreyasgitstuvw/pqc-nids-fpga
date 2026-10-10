@@ -26,7 +26,10 @@ async def reset_dut(dut):
     if hasattr(dut, "tx_valid"):
         dut.tx_valid.value = 0
         dut.tx_data.value = 0
-    if hasattr(dut, "rx_pin"):
+    if hasattr(dut, "rx_override_en"):
+        dut.rx_override_en.value = 0
+        dut.rx_override_pin.value = 1
+    elif hasattr(dut, "rx_pin"):
         dut.rx_pin.value = 1
     await RisingEdge(dut.clk)
     await RisingEdge(dut.clk)
@@ -89,3 +92,67 @@ async def test_uart_timing_accuracy(dut):
     # Allow tx to complete
     while dut.tx_busy.value == 1:
         await RisingEdge(dut.clk)
+
+
+@cocotb.test()
+async def test_uart_glitch_rejection(dut):
+    """Verifies that a short glitch on rx line (< 16 cycles) is rejected."""
+    if not hasattr(dut, "rx_override_en"):
+        return
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    await reset_dut(dut)
+
+    dut.rx_override_en.value = 1
+    dut.rx_override_pin.value = 1
+    await RisingEdge(dut.clk)
+
+    # 4-cycle glitch
+    dut.rx_override_pin.value = 0
+    for _ in range(4):
+        await RisingEdge(dut.clk)
+    dut.rx_override_pin.value = 1
+
+    # Verify no spurious rx_valid or frame_err
+    for _ in range(50):
+        await RisingEdge(dut.clk)
+        assert dut.rx_valid.value == 0, "Spurious rx_valid on glitch!"
+        assert dut.frame_err.value == 0, "Spurious frame_err on glitch!"
+
+
+@cocotb.test()
+async def test_uart_framing_error(dut):
+    """Verifies that frame_err is asserted when the stop bit is low."""
+    if not hasattr(dut, "rx_override_en"):
+        return
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    await reset_dut(dut)
+
+    dut.rx_override_en.value = 1
+    dut.rx_override_pin.value = 1
+    await RisingEdge(dut.clk)
+
+    # Start bit (0 for 33 cycles)
+    dut.rx_override_pin.value = 0
+    for _ in range(33):
+        await RisingEdge(dut.clk)
+
+    # 8 data bits (0x55 = alternating 1 and 0)
+    for i in range(8):
+        dut.rx_override_pin.value = 1 if (i % 2 == 0) else 0
+        for _ in range(33):
+            await RisingEdge(dut.clk)
+
+    # Corrupted stop bit (0 for 34 cycles)
+    dut.rx_override_pin.value = 0
+    frame_err_observed = False
+    for _ in range(34):
+        await RisingEdge(dut.clk)
+        if dut.frame_err.value == 1:
+            frame_err_observed = True
+
+    for _ in range(10):
+        await RisingEdge(dut.clk)
+        if dut.frame_err.value == 1:
+            frame_err_observed = True
+
+    assert frame_err_observed, "frame_err was not asserted on corrupted stop bit!"
