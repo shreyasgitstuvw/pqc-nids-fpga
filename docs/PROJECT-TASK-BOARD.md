@@ -196,17 +196,17 @@ Lower bounds — no control/memory overhead. At 3 Mbaud, receiving the 768-byte 
 > blocked until you agree those port names with them. Agreeing the names is a five-minute
 > conversation and doesn't require your RTL to exist — do it now, not when `D4` finishes.
 
-- [ ] `D3` Check proposed port numbers against test traffic, agree with A · blocks `A5` → blocks `A1`
-- [ ] `D4` `chacha20.v` — quarter-round core, RFC 8439 vectors, **plus the §3.1 plaintext output ports** · **Phase III exit** · **unblocks `B8`**
-- [ ] `D6` `model/chacha_poly.py` reference for streaming behaviour
-- [ ] `D7` `drop_engine.v` **stub** — just OR the fail bits · **Phase III exit** · **unblocks `B12`**
-- [ ] `D5` `poly1305.v` — MAC accumulator, RFC 8439 vectors · **Phase III exit** · ⛔ waiting on `D4`
-- [ ] `D2` Give A the `poly1305.v` verdict latency · blocks `A7` → blocks `A1` · ⛔ waiting on `D5`
-- [ ] `D1` Read and sign off the interface contract · ⛔ waiting on `A2`, `A3`, `A4`
-- [ ] `D8` `session_mgr.v` — write path blind to rejection · ⛔ waiting on `C6`, `A6`
-- [ ] `D10` Document the priority rule for same-cycle failures from both lanes · ⛔ waiting on `A7`
-- [ ] `D11` `chacha_poly` verified on sustained multi-packet streams · **Phase VI exit** · ⛔ waiting on `D5`, `D6`
-- [ ] `D9` `drop_engine.v` full — per-reason counters, sub-µs, nothing silent, **§6 telemetry exception (BAD_TAG suppresses the SIGNATURE count)** · **Phase VI exit** · ⛔ waiting on `A6`, `A7`, `B12`
+- [x] `D3` Check proposed port numbers against test traffic, agree with A · blocks `A5` → blocks `A1`
+- [x] `D4` `chacha20.v` — quarter-round core, RFC 8439 vectors, **plus the §3.1 plaintext output ports** · **Phase III exit** · **unblocks `B8`**
+- [x] `D6` `model/chacha_poly.py` reference for streaming behaviour
+- [x] `D7` `drop_engine.v` **stub** — just OR the fail bits · **Phase III exit** · **unblocks `B12`**
+- [x] `D5` `poly1305.v` — MAC accumulator, RFC 8439 vectors · **Phase III exit** · ⛔ waiting on `D4`
+- [x] `D2` Give A the `poly1305.v` verdict latency · blocks `A7` → blocks `A1` · ⛔ waiting on `D5`
+- [x] `D1` Read and sign off the interface contract · ⛔ waiting on `A2`, `A3`, `A4`
+- [x] `D8` `session_mgr.v` — write path blind to rejection · ⛔ waiting on `C6`, `A6`
+- [x] `D10` Document the priority rule for same-cycle failures from both lanes · ⛔ waiting on `A7`
+- [x] `D11` `chacha_poly` verified on sustained multi-packet streams · **Phase VI exit** · ⛔ waiting on `D5`, `D6`
+- [x] `D9` `drop_engine.v` full — per-reason counters, sub-µs, nothing silent, **§6 telemetry exception (BAD_TAG suppresses the SIGNATURE count)** · **Phase VI exit** · ⛔ waiting on `A6`, `A7`, `B12`
 - [ ] `D12` Wire counters to the host-visible LED/OLED interface · ⛔ waiting on `D9`
 
 **Two hard requirements on `D8`, from Member C:**
