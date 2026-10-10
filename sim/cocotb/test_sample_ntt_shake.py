@@ -125,22 +125,25 @@ async def sample_ntt_shake_matrix_a_all_four_polys(dut):
         await FallingEdge(dut.clk)
         dut.shake_init.value = 0
 
-        # 2. Start sample_ntt
+        # 2. Start sample_ntt and measure end-to-end cycles
         dut.target_poly_id.value = poly_idx
         dut.sample_start.value = 1
         await FallingEdge(dut.clk)
         dut.sample_start.value = 0
 
-        # 3. Absorb 34-byte seed into shake_wrapper
-        await absorb_message(dut, seed_bytes)
+        # 3. Absorb 34-byte seed into shake_wrapper concurrently while counting cycles
+        absorb_task = cocotb.start_soon(absorb_message(dut, seed_bytes))
 
-        # 4. Wait for sample_ntt completion
-        timeout = 0
-        while int(dut.sample_done.value) == 0 and timeout < 2500:
+        # 4. Count cycles until sample_ntt completes
+        measured_cycles = 1
+        while int(dut.sample_done.value) == 0 and measured_cycles < 2500:
             await FallingEdge(dut.clk)
-            timeout += 1
+            measured_cycles += 1
 
+        await absorb_task
         assert int(dut.sample_done.value) == 1, f"Matrix A[{i},{j}] failed to complete"
+        dut._log.info(f"Matrix A[{i},{j}] end-to-end measured latency: {measured_cycles} cycles")
+        assert 350 <= measured_cycles <= 450, f"Measured latency {measured_cycles} outside expected range [350, 450]"
         mon_task.cancel()
 
         actual_poly = ram.read_poly(poly_idx)
