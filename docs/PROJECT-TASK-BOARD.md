@@ -171,8 +171,8 @@ port is invisible to you. One-line confirmation, but it needs to be explicit.
 - [x] `C13b` `byte_encode.v` / `byte_decode.v` — bit packing/unpacking for d in {1, 4, 10, 12} (u, v, message, and uncompressed coefficients/keys; 256 cycles/poly, valid/ready 64-bit word stream) · **Phase IV exit**
 - [x] `C13c` `pack_8_to_64.v` — 8-bit ek/dk/ciphertext source -> 64-bit words · bridges byte-wide packet bus to `byte_decode.v`
 - [x] `C13d` `sample_ntt.v` — SHAKE128 rejection sampler for matrix Â (FIPS 203 Alg. 7, 12-bit candidates mod q) · verified clean Verilator lint and cocotb bit-exact
-- [ ] `C13e` `poly_add_sub.v` — coefficient-wise modular add/sub mod q=3329 (L=1 cycle streaming datapath) · blocks `C14`
-- [ ] `C14` `mlkem_top.v` — keygen / encaps / decaps state machines · ⛔ waiting on `C11`, `C12`, `C13`, `C13b`, `C13c`, `C13d`, `C13e`, `A6`
+- [x] `C13e` `poly_add_sub.v` — coefficient-wise modular add/sub mod q=3329 (autonomous 256-coeff sequencer, 259 cycles/poly, bit-exact mod 3329) · unblocks `C14`
+- [x] `C14` `mlkem_top.v` — keygen / encaps / decaps top-level crypto engine (8 poly RAM banks, 6.5 BRAM36, constant-time decaps silent implicit rejection)
 - [ ] `C15` `fo_transform.v` — structural signals, cryptographic stays silent · ⛔ waiting on `C14`
 - [ ] `C16` FIPS 203 KAT through `mlkem_top.v` — zero unexplained mismatches · **PHASE V HARD GATE** · ⛔ waiting on `C15`
 - [ ] `C17` Joint Seam-2 indistinguishability test with D · **Phase VI exit** · ⛔ waiting on `C15`, `D8`
