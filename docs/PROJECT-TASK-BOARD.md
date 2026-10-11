@@ -168,11 +168,11 @@ port is invisible to you. One-line confirmation, but it needs to be explicit.
 - [x] `C13c` `pack_8_to_64.v` — 8-bit ek/dk/ciphertext source -> 64-bit words · bridges byte-wide packet bus to `byte_decode.v`
 - [x] `C13d` `sample_ntt.v` — SHAKE128 rejection sampler for matrix Â (FIPS 203 Alg. 7, 12-bit candidates mod q) · verified clean Verilator lint and cocotb bit-exact
 - [x] `C13e` `poly_add_sub.v` — coefficient-wise modular add/sub mod q=3329 (autonomous 256-coeff sequencer, 259 cycles/poly, bit-exact mod 3329) · unblocks `C14`
-- [ ] `C14` `mlkem_top.v` — keygen / encaps / decaps state machines · ⛔ waiting on `C11`, `C12`, `C13`, `C13b`, `C13c`, `C13d`, `C13e`, `A6`
-- [ ] `C15` `fo_transform.v` — structural signals, cryptographic stays silent · ⛔ waiting on `C14`
-- [ ] `C16` FIPS 203 KAT through `mlkem_top.v` — zero unexplained mismatches · **PHASE V HARD GATE** · ⛔ waiting on `C15`
-- [ ] `C17` Joint Seam-2 indistinguishability test with D · **Phase VI exit** · ⛔ waiting on `C15`, `D8`
-- [ ] `C18` Log measured keygen/encaps/decaps cycle counts for §6.3 · ⛔ waiting on `C16`
+- [x] `C14` `mlkem_top.v` — keygen / encaps / decaps state machines, packet-bus ingest, separate `ek_ram`, `rng_*` entropy handshake (PRs #17, #18, #19; 14 cocotb tests, verilator -Wall clean)
+- [ ] `C15` `fo_transform.v` — structural signals, cryptographic stays silent · behaviour is implemented and verified inside `mlkem_top.v` (constant-time compare + select, no verdict); there is no separate `fo_transform.v`. Tick once the owner accepts that, or split the module out
+- [x] `C16` FIPS 203 KAT through `mlkem_top.v` — zero unexplained mismatches · **PHASE V HARD GATE** · `test_mlkem_kat_full.py`: KeyGen 25/25, Encaps 25/25, ek check 10/10, Decaps 10/10 (incl. implicit rejection). The `dk` hash check (tgId 7) is model-only by design: the device never imports a `dk`
+- [x] `C17` Joint Seam-2 indistinguishability test with D · **Phase VI exit** · `test_seam2_kem_session.py` drives real `mlkem_top.v` into real `session_mgr.v`; authentic vs rejected waveform identical per cycle; `scripts/mutation_check_seam2.py` proves it catches a timing leak and a verdict leak. Member D has not yet reviewed it
+- [x] `C18` Log measured keygen/encaps/decaps cycle counts for §6.3 · KeyGen 17,640–17,669, Encaps 24,022–24,049, Decaps 33,786–33,814 cycles (pre-synthesis; see `docs/Member C/Member-C-KEM-Cycle-Counts.md`)
 
 **Measured, for whoever needs the numbers** (`model/mlkem/opcount.py`):
 
