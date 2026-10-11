@@ -105,12 +105,12 @@ You're the natural owner of this since you consume it most heavily. Trim the ful
 
 ## 5. What "done" looks like for Phase III
 
-- [ ] `protocol_validator.v` passes ~15 hand-crafted malformed-packet cases against `model/detect.py`
-- [ ] `cam_matcher.v` matches known signatures in exactly 1 clock cycle, zero false negatives on loaded set
-- [ ] `count_min_sketch.v` sizing documented with analytical (epsilon, delta) bound, verified bit-exact against Python reference
-- [ ] Measured false-positive rate on real CIC-IDS2017 replay reported and compared against the analytical bound
-- [ ] `sim/vectors/cicids2017_subset/` curated, labeled, and checked into the repo
-- [ ] All three modules wired to emit `{fail, reason_code}` per the interface contract
+- [x] `protocol_validator.v` passes ~15 hand-crafted malformed-packet cases against `model/detect.py` (17 vectors verified, 4 cocotb tests pass)
+- [x] `cam_matcher.v` matches known signatures in exactly 1 clock cycle, zero false negatives on loaded set (16 signatures verified, 4 cocotb tests pass)
+- [x] `count_min_sketch.v` sizing documented with analytical (epsilon, delta) bound, verified bit-exact against Python reference (5 cocotb tests pass)
+- [x] Measured false-positive rate on real CIC-IDS2017 replay reported and compared against the analytical bound (0.0% FPR, documented in `docs/Member B/cms_accuracy_report.md`)
+- [x] `sim/vectors/cicids2017_subset/` curated, labeled, and checked into the repo (1,220 packets, 4 pcaps, labels.json oracle)
+- [x] All three modules wired to emit `{fail, reason_code}` per the interface contract (verified end-to-end via `sim/cocotb/test_lane2_drop_engine.py` against drop_engine.v)
 
 ## 6. Dependencies and handoffs
 

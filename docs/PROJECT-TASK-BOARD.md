@@ -133,10 +133,10 @@ consuming module, not a preference.
 - [x] `B4` Confirm the handshake port sits inside the CMS monitored space · confirmed (ports 51001/51002 keyed by flow 5-tuple)
 - [x] `B6` `model/detect.py` — validator, CAM and CMS reference + 800-flow collision test landed (commit 70ddb03)
 - [x] `B7` `protocol_validator.v` — combinational header checks (Rules 1–6) complete
-- [ ] `B8` `cam_matcher.v` — 16–32 signatures, 1-cycle match, **reads plaintext stream (contract §3.1), not the packet bus** · ⛔ waiting on `B1`, `D4` (plaintext port names)
+- [x] `B8` `cam_matcher.v` — 16–32 signatures, 1-cycle match, **reads plaintext stream (contract §3.1), not the packet bus** · 16 canonical threat signatures verified bit-exact vs model/detect.py & signature.pcap (4 cocotb tests pass)
 - [x] `B9` `count_min_sketch.v` + `hash_functions.v` · dual-sketch BRAM pipeline verified bit-exact vs model/detect.py (8 cocotb tests pass)
 - [x] `B11` Measure false-positive rate on replay vs analytical bound · **Phase III exit** · 0.0% FPR, empirical error strictly bounded by (eps, delta), documented in docs/Member B/cms_accuracy_report.md
-- [ ] `B12` All three detectors emit `{fail, reason_code}` per contract · **Phase III exit** · ⛔ waiting on `B7`, `B8`, `B9`, `D7`
+- [x] `B12` All three detectors emit `{fail, reason_code}` per contract · **Phase III exit** · verified via `sim/cocotb/test_lane2_drop_engine.py` (5 cocotb tests pass against drop_engine.v)
 
 **On `B4`:** a fixed handshake port is trivially floodable, and that's your lane, not C's. If your
 sketch only keys on `(src_ip, dst_ip)` and not `(src_ip, dst_port)`, a flood aimed at the handshake

@@ -55,7 +55,7 @@ Hardware Architecture & BRAM Sizing (ZedBoard XC7Z020 @ 100 MHz):
 import math
 import random
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # =====================================================================
@@ -402,6 +402,103 @@ class CMSThreatDetector:
             return True, RC_SCAN, c_flow, c_host
         else:
             return False, RC_NONE, c_flow, c_host
+
+
+# =====================================================================
+# START OF SECTION 4B: CAM SIGNATURE MATCHER (rtl/detect/cam_matcher.v)
+# =====================================================================
+
+CAM_SIGNATURES: List[Dict[str, Any]] = [
+    {"id": 1,  "name": "LOG4SHELL",      "pattern": b"${jndi:",        "len": 7},
+    {"id": 2,  "name": "SHELL_EXEC",     "pattern": b"/bin/sh",        "len": 7},
+    {"id": 3,  "name": "REVERSE_SHELL",  "pattern": b"/bin/bash",      "len": 9},
+    {"id": 4,  "name": "WEBSHELL_CMD",   "pattern": b"cmd.exe",        "len": 7},
+    {"id": 5,  "name": "POWERSHELL",     "pattern": b"powershell",    "len": 10},
+    {"id": 6,  "name": "NOP_SLED",       "pattern": b"\x90" * 8,       "len": 8},
+    {"id": 7,  "name": "SQL_INJECTION",  "pattern": b"UNION+SELECT",   "len": 12},
+    {"id": 8,  "name": "PHP_EVAL",       "pattern": b"eval(base64",   "len": 11},
+    {"id": 9,  "name": "PHP_SYSTEM",     "pattern": b"system($_GET",  "len": 12},
+    {"id": 10, "name": "ETC_PASSWD",     "pattern": b"/etc/passwd",   "len": 11},
+    {"id": 11, "name": "XSS_SCRIPT",     "pattern": b"<script>",      "len": 8},
+    {"id": 12, "name": "PATH_TRAVERSAL", "pattern": b"../../",        "len": 6},
+    {"id": 13, "name": "WGET_DROPPER",   "pattern": b"wget ",         "len": 5},
+    {"id": 14, "name": "CURL_DROPPER",   "pattern": b"curl ",         "len": 5},
+    {"id": 15, "name": "CHMOD_EXEC",     "pattern": b"chmod +x",      "len": 8},
+    {"id": 16, "name": "RECON_WHOAMI",   "pattern": b"whoami",        "len": 6},
+]
+
+
+class CAMMatcher:
+    """
+    Streaming Content-Addressable Memory (CAM) Signature Matcher for Lane 2.
+    Bit-exact software twin for rtl/detect/cam_matcher.v.
+
+    Scans the incoming decrypted plaintext stream (Interface Contract v1.1.0 §3.1)
+    against a bank of 16 threat signatures in 1 clock cycle using a 16-byte sliding window.
+    Emits 1-cycle strobe v_cam_valid with {v_cam_fail, v_cam_reason = RC_SIGNATURE}.
+    """
+
+    def __init__(self, signatures: Optional[List[Dict[str, Any]]] = None):
+        self.signatures = signatures if signatures is not None else CAM_SIGNATURES
+        self.window = bytearray()
+        self.match_latched = False
+        self.matched_sig_id = 0
+        self.matched_offset = 0
+        self.byte_count = 0
+
+    def reset_packet(self) -> None:
+        """Resets sliding window and match status on packet start (SOF)."""
+        self.window = bytearray()
+        self.match_latched = False
+        self.matched_sig_id = 0
+        self.matched_offset = 0
+        self.byte_count = 0
+
+    def feed_byte(self, byte_val: int, sof: bool = False, eof: bool = False) -> Tuple[bool, bool, int, int, int]:
+        """
+        Feeds one decrypted plaintext byte (matching pt_valid clock cycle).
+
+        Returns:
+            Tuple of:
+              (v_valid: bool, v_fail: bool, v_reason: int, match_sig_id: int, match_offset: int)
+        """
+        if sof:
+            self.reset_packet()
+
+        self.byte_count += 1
+        self.window.append(byte_val & 0xFF)
+        if len(self.window) > 16:
+            self.window.pop(0)
+
+        # Parallel 16-way pattern match across sliding window
+        for sig in self.signatures:
+            sig_pat = sig["pattern"]
+            sig_len = sig["len"]
+            if len(self.window) >= sig_len:
+                if bytes(self.window[-sig_len:]) == sig_pat:
+                    if not self.match_latched:
+                        self.match_latched = True
+                        self.matched_sig_id = sig["id"]
+                        self.matched_offset = self.byte_count - sig_len
+
+        # Egress verdict strobe resolves on eof (1 cycle registered)
+        v_valid = eof
+        v_fail = self.match_latched
+        v_reason = RC_SIGNATURE if self.match_latched else RC_NONE
+        return v_valid, v_fail, v_reason, self.matched_sig_id, self.matched_offset
+
+    def scan_payload(self, payload: bytes) -> Tuple[bool, int, int, int]:
+        """Convenience method to scan full payload bytes."""
+        self.reset_packet()
+        if len(payload) == 0:
+            return False, RC_NONE, 0, 0
+        v_fail = False
+        v_reason = RC_NONE
+        for i, b in enumerate(payload):
+            sof = (i == 0)
+            eof = (i == len(payload) - 1)
+            _, v_fail, v_reason, _, _ = self.feed_byte(b, sof, eof)
+        return v_fail, v_reason, self.matched_sig_id, self.matched_offset
 
 
 # =====================================================================
@@ -972,8 +1069,35 @@ def run_self_test() -> bool:
     assert pv_passed == len(PROTOCOL_VALIDATOR_TEST_VECTORS)
     print(f"  --> PASS: All {pv_passed} protocol validator test vectors verified bit-exact.")
 
+    # -----------------------------------------------------------------
+    # Test 6: CAM Matcher Signature Matching & Benign Controls
+    # -----------------------------------------------------------------
+    print("\n[6] CAM Signature Matcher Suite (16 Attack Patterns & Controls):")
+    cam = CAMMatcher()
+
+    for sig in CAM_SIGNATURES:
+        test_payload = b"HEADER_DATA_" + sig["pattern"] + b"_TRAILER_PADDING"
+        fail, reason, sig_id, offset = cam.scan_payload(test_payload)
+        assert fail, f"CAM missed signature: {sig['name']}"
+        assert reason == RC_SIGNATURE, f"CAM emitted wrong reason: {reason}"
+        assert sig_id == sig["id"], f"Wrong sig_id: expected {sig['id']}, got {sig_id}"
+        print(f"    Sig {sig['id']:02d}: {sig['name']:<20} (len={sig['len']:02d}) -> DETECTED (offset={offset})")
+
+    benign_samples = [
+        b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n",
+        b"POST /submit HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}",
+        b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f",
+        b"HELLO WORLD CLEAN TRAFFIC NORMAL USER STREAMING DATA",
+    ]
+    for b_idx, b_payload in enumerate(benign_samples, 1):
+        fail, reason, _, _ = cam.scan_payload(b_payload)
+        assert not fail, f"CAM false alarm on benign payload {b_idx}!"
+        assert reason == RC_NONE, f"CAM non-zero reason on benign payload: {reason}"
+    print("    Benign Controls (4 payloads)         -> ALL PASSED (0% false alarms)")
+    print("  --> PASS: All 16 threat signatures detected, zero false alarms on controls.")
+
     print("\n====================================================================")
-    print("ALL Lane 2 Dual-Sketch & Protocol Validator checks PASSED.")
+    print("ALL Lane 2 Dual-Sketch, Protocol Validator & CAM checks PASSED.")
     print("====================================================================")
     return True
 
