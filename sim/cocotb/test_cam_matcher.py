@@ -126,7 +126,7 @@ async def send_payload_stream(dut, payload: bytes):
 
 
 @cocotb.test()
-async def test_cam_all_signatures(dut):
+async def run_cam_all_signatures(dut):
     """Verifies that all 16 canonical threat signatures match individually."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -152,7 +152,7 @@ async def test_cam_all_signatures(dut):
 
 
 @cocotb.test()
-async def test_cam_benign_controls(dut):
+async def run_cam_benign_controls(dut):
     """Verifies that benign traffic produces zero false alarms."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -179,7 +179,7 @@ async def test_cam_benign_controls(dut):
 
 
 @cocotb.test()
-async def test_cam_pcap_replay(dut):
+async def run_cam_pcap_replay(dut):
     """Replays signature.pcap (20 packets) and validates ground-truth agreement."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -208,7 +208,7 @@ async def test_cam_pcap_replay(dut):
 
 
 @cocotb.test()
-async def test_cam_back_to_back_streaming(dut):
+async def run_cam_back_to_back_streaming(dut):
     """Stress tests back-to-back streaming packets with zero idle bubbles."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -227,21 +227,29 @@ async def test_cam_back_to_back_streaming(dut):
         assert reason_hw == exp_reason, f"Packet {p_idx}: expected reason {exp_reason:#x}, got {reason_hw:#x}"
 
 
-if __name__ == "__main__":
+def test_runner():
+    """pytest entry point using cocotb.runner and iverilog."""
     from cocotb.runner import get_runner
 
-    runner = get_runner("icarus")
+    sim = os.getenv("SIM", "icarus")
+    runner = get_runner(sim)
     runner.build(
         sources=[
             PROJ_ROOT / "rtl" / "detect" / "cam_matcher.v",
         ],
         hdl_toplevel="cam_matcher",
         includes=[PROJ_ROOT / "rtl" / "control"],
-        build_dir=PROJ_ROOT / "sim" / "build",
+        build_dir=PROJ_ROOT / "sim" / "sim_build" / "cam_matcher",
         always=True,
     )
     runner.test(
         hdl_toplevel="cam_matcher",
         test_module="test_cam_matcher",
+        build_dir=PROJ_ROOT / "sim" / "sim_build" / "cam_matcher",
         test_dir=PROJ_ROOT / "sim" / "cocotb",
     )
+
+
+if __name__ == "__main__":
+    test_runner()
+

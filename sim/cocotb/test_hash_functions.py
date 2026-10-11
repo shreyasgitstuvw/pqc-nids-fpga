@@ -66,7 +66,7 @@ async def reset_dut(dut):
 
 
 @cocotb.test()
-async def test_hash_functions_vectors(dut):
+async def hash_functions_vectors(dut):
     """Verifies hand-crafted known IP and port vectors."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -111,7 +111,7 @@ async def test_hash_functions_vectors(dut):
 
 
 @cocotb.test()
-async def test_hash_functions_fuzz(dut):
+async def hash_functions_fuzz(dut):
     """Verifies 200 randomized inputs against Python model oracle."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -143,7 +143,7 @@ async def test_hash_functions_fuzz(dut):
 
 
 @cocotb.test()
-async def test_hash_functions_streaming(dut):
+async def hash_functions_streaming(dut):
     """Tests back-to-back stream with consecutive valid cycles."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -190,19 +190,28 @@ async def test_hash_functions_streaming(dut):
     assert int(dut.out_valid.value) == 0
 
 
-if __name__ == "__main__":
+def test_runner():
+    """pytest entry point using cocotb.runner and iverilog."""
+    import os
     from cocotb.runner import get_runner
 
     proj = Path(__file__).resolve().parent.parent.parent
-    runner = get_runner("icarus")
+    sim = os.getenv("SIM", "icarus")
+    runner = get_runner(sim)
     runner.build(
         sources=[proj / "rtl" / "detect" / "hash_functions.v"],
         hdl_toplevel="hash_functions",
-        build_dir=proj / "sim" / "build",
+        build_dir=proj / "sim" / "sim_build" / "hash_functions",
         always=True,
     )
     runner.test(
         hdl_toplevel="hash_functions",
         test_module="test_hash_functions",
+        build_dir=proj / "sim" / "sim_build" / "hash_functions",
         test_dir=proj / "sim" / "cocotb",
     )
+
+
+if __name__ == "__main__":
+    test_runner()
+

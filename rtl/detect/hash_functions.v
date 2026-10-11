@@ -82,6 +82,12 @@ wire [9:0]  host_idx_comb_1 = host_val_1[31:22];
 wire [9:0]  host_idx_comb_2 = host_val_2[31:22];
 wire [9:0]  host_idx_comb_3 = host_val_3[31:22];
 
+// Unused lower bits sink to satisfy Verilator -Wall
+wire _unused_bits = &{1'b0,
+    flow_val_0[20:0], flow_val_1[20:0], flow_val_2[20:0], flow_val_3[20:0],
+    host_val_0[21:0], host_val_1[21:0], host_val_2[21:0], host_val_3[21:0]
+};
+
 // ============================================================================
 // SECTION 5: Output Pipeline Registers (1-Cycle Latency)
 // ============================================================================

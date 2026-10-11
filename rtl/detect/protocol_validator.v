@@ -77,9 +77,8 @@ module protocol_validator (
     wire flag_ack = tcp_flags[4];
     wire [5:0] ctrl_flags = tcp_flags[5:0];
 
-    /* verilator lint_off UNUSED */
-    wire [1:0] _unused_tcp_flags = tcp_flags[7:6];
-    /* verilator lint_on UNUSED */
+    // Unused tcp flags sink for Verilator -Wall
+    wire _unused_flags = &{1'b0, tcp_flags[7:6]};
 
 // =====================================================================
 // START OF SECTION 3: COMBINATIONAL VALIDATION RULES (RULES 1 TO 6)

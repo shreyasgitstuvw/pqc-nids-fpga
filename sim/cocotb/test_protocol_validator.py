@@ -58,7 +58,7 @@ async def reset_dut(dut):
 # =====================================================================
 
 @cocotb.test()
-async def test_protocol_validator_vectors(dut):
+async def protocol_validator_vectors(dut):
     """Verifies all 17 published test vectors against model/detect.py."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -131,7 +131,7 @@ async def test_protocol_validator_vectors(dut):
 # =====================================================================
 
 @cocotb.test()
-async def test_protocol_validator_random_fuzz(dut):
+async def protocol_validator_random_fuzz(dut):
     """Drives 250 randomized packets and checks bit-exact agreement with model."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -231,7 +231,7 @@ async def test_protocol_validator_random_fuzz(dut):
 # =====================================================================
 
 @cocotb.test()
-async def test_protocol_validator_back_to_back(dut):
+async def protocol_validator_back_to_back(dut):
     """Pipes consecutive packets on every clock cycle with zero bubbles."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -317,7 +317,7 @@ async def test_protocol_validator_back_to_back(dut):
 
 
 @cocotb.test()
-async def test_protocol_validator_reset_clears(dut):
+async def protocol_validator_reset_clears(dut):
     """Verifies that synchronous reset immediately clears all verdict registers."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -344,22 +344,31 @@ async def test_protocol_validator_reset_clears(dut):
     assert int(dut.verdict_reason.value) == RC_NONE, "verdict_reason was not cleared by reset"
 
 
-if __name__ == "__main__":
+def test_runner():
+    """pytest entry point using cocotb.runner and iverilog."""
+    import os
     from pathlib import Path
     from cocotb.runner import get_runner
 
     proj = Path(__file__).resolve().parent.parent.parent
-    runner = get_runner("icarus")
+    sim = os.getenv("SIM", "icarus")
+    runner = get_runner(sim)
     runner.build(
         sources=[proj / "rtl" / "detect" / "protocol_validator.v"],
         hdl_toplevel="protocol_validator",
         includes=[proj / "rtl" / "control"],
-        build_dir=proj / "sim" / "build",
+        build_dir=proj / "sim" / "sim_build" / "protocol_validator",
         always=True,
     )
     runner.test(
         hdl_toplevel="protocol_validator",
         test_module="test_protocol_validator",
+        build_dir=proj / "sim" / "sim_build" / "protocol_validator",
         test_dir=proj / "sim" / "cocotb",
     )
+
+
+if __name__ == "__main__":
+    test_runner()
+
 

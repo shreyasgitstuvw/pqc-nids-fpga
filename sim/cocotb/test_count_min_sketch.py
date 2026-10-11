@@ -91,7 +91,7 @@ async def send_packet_header(dut, src_ip: int, dst_port: int, dst_ip: int = 0x0A
 
 
 @cocotb.test()
-async def test_cms_flow_increments(dut):
+async def cms_flow_increments(dut):
     """Verifies flow and host counter increments on identical flow."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -117,7 +117,7 @@ async def test_cms_flow_increments(dut):
 
 
 @cocotb.test()
-async def test_cms_flood_trigger(dut):
+async def cms_flood_trigger(dut):
     """Verifies that exceeding THRESH_FLOOD asserts RC_FLOOD."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -138,7 +138,7 @@ async def test_cms_flood_trigger(dut):
 
 
 @cocotb.test()
-async def test_cms_scan_trigger(dut):
+async def cms_scan_trigger(dut):
     """Verifies that exceeding THRESH_SCAN with low per-port fanout asserts RC_SCAN."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -158,7 +158,7 @@ async def test_cms_scan_trigger(dut):
 
 
 @cocotb.test()
-async def test_cms_random_fuzz(dut):
+async def cms_random_fuzz(dut):
     """Feeds 100 randomized packets and checks bit-exact agreement against oracle."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -197,7 +197,7 @@ async def test_cms_random_fuzz(dut):
 
 
 @cocotb.test()
-async def test_cms_reset_clears(dut):
+async def cms_reset_clears(dut):
     """Verifies that synchronous reset flushes pipeline and resets counters."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -230,11 +230,14 @@ async def test_cms_reset_clears(dut):
     assert c_h == 1, f"Host counter after reset did not restart at 1: got {c_h}"
 
 
-if __name__ == "__main__":
+def test_runner():
+    """pytest entry point using cocotb.runner and iverilog."""
+    import os
     from cocotb.runner import get_runner
 
     proj = Path(__file__).resolve().parent.parent.parent
-    runner = get_runner("icarus")
+    sim = os.getenv("SIM", "icarus")
+    runner = get_runner(sim)
     runner.build(
         sources=[
             proj / "rtl" / "detect" / "hash_functions.v",
@@ -242,11 +245,17 @@ if __name__ == "__main__":
         ],
         hdl_toplevel="count_min_sketch",
         includes=[proj / "rtl" / "control"],
-        build_dir=proj / "sim" / "build",
+        build_dir=proj / "sim" / "sim_build" / "count_min_sketch",
         always=True,
     )
     runner.test(
         hdl_toplevel="count_min_sketch",
         test_module="test_count_min_sketch",
+        build_dir=proj / "sim" / "sim_build" / "count_min_sketch",
         test_dir=proj / "sim" / "cocotb",
     )
+
+
+if __name__ == "__main__":
+    test_runner()
+

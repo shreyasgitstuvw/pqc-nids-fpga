@@ -110,7 +110,7 @@ async def send_packet(dut, pkt):
 
 
 @cocotb.test()
-async def test_replay_benign_pcap(dut):
+async def replay_benign_pcap(dut):
     """Replays benign.pcap (150 packets) and verifies 0% false positive rate."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -128,7 +128,7 @@ async def test_replay_benign_pcap(dut):
 
 
 @cocotb.test()
-async def test_replay_synflood_pcap(dut):
+async def replay_synflood_pcap(dut):
     """Replays synflood.pcap (600 packets) and verifies RC_FLOOD triggers at packet 512."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -148,7 +148,7 @@ async def test_replay_synflood_pcap(dut):
 
 
 @cocotb.test()
-async def test_replay_portscan_pcap(dut):
+async def replay_portscan_pcap(dut):
     """Replays portscan.pcap (450 packets) and verifies RC_SCAN triggers at probe 384."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -167,10 +167,13 @@ async def test_replay_portscan_pcap(dut):
     )
 
 
-if __name__ == "__main__":
+def test_runner():
+    """pytest entry point using cocotb.runner and iverilog."""
+    import os
     from cocotb.runner import get_runner
 
-    runner = get_runner("icarus")
+    sim = os.getenv("SIM", "icarus")
+    runner = get_runner(sim)
     runner.build(
         sources=[
             PROJ_ROOT / "rtl" / "detect" / "hash_functions.v",
@@ -178,11 +181,17 @@ if __name__ == "__main__":
         ],
         hdl_toplevel="count_min_sketch",
         includes=[PROJ_ROOT / "rtl" / "control"],
-        build_dir=PROJ_ROOT / "sim" / "build",
+        build_dir=PROJ_ROOT / "sim" / "sim_build" / "pcap_replay",
         always=True,
     )
     runner.test(
         hdl_toplevel="count_min_sketch",
         test_module="test_pcap_replay",
+        build_dir=PROJ_ROOT / "sim" / "sim_build" / "pcap_replay",
         test_dir=PROJ_ROOT / "sim" / "cocotb",
     )
+
+
+if __name__ == "__main__":
+    test_runner()
+

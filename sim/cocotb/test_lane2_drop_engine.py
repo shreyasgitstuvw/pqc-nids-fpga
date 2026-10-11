@@ -172,7 +172,7 @@ async def send_packet(
 
 
 @cocotb.test()
-async def test_lane2_benign_clean_traffic(dut):
+async def lane2_benign_clean_traffic(dut):
     """Clean benign packet passes all 3 detectors and drop_engine."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -185,7 +185,7 @@ async def test_lane2_benign_clean_traffic(dut):
 
 
 @cocotb.test()
-async def test_lane2_protocol_violation(dut):
+async def lane2_protocol_violation(dut):
     """Malformed TCP flag combination (SYN+FIN) triggers RC_MALFORMED."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -199,7 +199,7 @@ async def test_lane2_protocol_violation(dut):
 
 
 @cocotb.test()
-async def test_lane2_cam_signature_attack(dut):
+async def lane2_cam_signature_attack(dut):
     """Log4Shell signature in plaintext stream triggers RC_SIGNATURE."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -214,7 +214,7 @@ async def test_lane2_cam_signature_attack(dut):
 
 
 @cocotb.test()
-async def test_lane2_cross_lane_priority(dut):
+async def lane2_cross_lane_priority(dut):
     """Multi-threat packet (Malformed + Signature): RC_MALFORMED dominates RC_SIGNATURE."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -230,7 +230,7 @@ async def test_lane2_cross_lane_priority(dut):
 
 
 @cocotb.test()
-async def test_lane2_cms_flood_trigger(dut):
+async def lane2_cms_flood_trigger(dut):
     """Volumetric SYN flood triggering RC_FLOOD at threshold 512."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -253,14 +253,14 @@ async def test_lane2_cms_flood_trigger(dut):
             assert dut.cnt_flood.value.integer >= 1
 
 
-
-if __name__ == "__main__":
+def test_runner():
+    """pytest entry point using cocotb.runner and iverilog."""
     from cocotb.runner import get_runner
 
     sim = os.getenv("SIM", "icarus")
     runner = get_runner(sim)
     runner.build(
-        verilog_sources=[
+        sources=[
             PROJ_ROOT / "rtl" / "detect" / "protocol_validator.v",
             PROJ_ROOT / "rtl" / "detect" / "cam_matcher.v",
             PROJ_ROOT / "rtl" / "detect" / "hash_functions.v",
@@ -270,11 +270,18 @@ if __name__ == "__main__":
         ],
         hdl_toplevel="lane2_drop_top",
         includes=[PROJ_ROOT / "rtl" / "control"],
+        build_dir=PROJ_ROOT / "sim" / "sim_build" / "lane2_drop",
         always=True,
     )
 
     runner.test(
         hdl_toplevel="lane2_drop_top",
         test_module="test_lane2_drop_engine",
+        build_dir=PROJ_ROOT / "sim" / "sim_build" / "lane2_drop",
         test_dir=PROJ_ROOT / "sim" / "cocotb",
     )
+
+
+if __name__ == "__main__":
+    test_runner()
+
