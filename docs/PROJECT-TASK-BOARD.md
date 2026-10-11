@@ -60,27 +60,25 @@ Critical path is now active across all three lanes:
 
 ## Ready to start right now
 
-Nothing is stopping any of these. If you own one, there is no reason it isn't moving today.
+Every task that used to be listed here is done. All four lanes' modules are built, lint
+clean and passing their own tests. What is left is **integration**, and it is one
+person's work now (Member C) rather than four lanes in parallel.
 
-| Task | Owner | What |
+| Task | What | Why it blocks |
 |---|---|---|
-| `A2` | A | Apply Member C's confirmations to §1, §3, §4, §5, §6 |
-| `A3` | A | Replace `HANDSHAKE_REJECT` → `HANDSHAKE_KEY_INVALID`, add the no-verdict rule |
-| `A4` | A | Decide handshake message direction (`packet_type` `2'b10` for ciphertext) |
-| `A8` | A | `uart_rx.v` / `uart_tx.v` at 3 Mbaud |
-| `A9` | A | `crc32.v` vs `zlib.crc32` |
-| `C8` | C | `keccak_f1600.v` — first RTL of the crypto lane |
-| `C10` | C | `ntt_core.v` / `butterfly.v` / `modmul.v` |
-| `D3` | D | Check port numbers against test traffic, agree with A |
-| `D4` | D | `chacha20.v` + RFC 8439 vectors |
-| `D6` | D | `model/chacha_poly.py` |
-| `D7` | D | `drop_engine.v` stub — **unblocks B's testbenches** |
+| `I1` | `session_lookup.v` — 5-tuple → session id | `parser.v` emits `session_id = 0`, `session_mgr` rejects 0, so no session can ever establish. Nothing downstream of the cipher works until this exists |
+| `I2` | `aead_framer.v` — key/nonce sequencer, AAD and tag extraction | `chacha_poly` needs `key`, `nonce`, `aad_*` and a parallel `expected_tag` that nothing produces |
+| `I3` | `rtl/top/pqc_nids_top.v` — the only synthesis target | there is no top level; `chacha_poly` is instantiated nowhere |
+| `I4` | `constraints/pqc_nids.xdc` + `scripts/build_bitstream.tcl` | no clock has ever been constrained; the demo's burn script references a build script that was never written |
+| `I5` | fix the cross-module defects found in the readiness review | see `docs/INTEGRATION-READINESS-REVIEW.md` |
+| `I6` | `rtl/io/` status display + `test-network/` + finish `smoke_test.py` | the demo's visible output and its traffic generator do not exist |
 
-**`D7` is the highest-value one left here** — the drop-engine stub is an afternoon's work and it
-unblocks `B12`. `C8`/`C10` are now unblocked too, since `C7` merged.
+**`I1` is the one that matters most** — it is the single reason the data path cannot
+function today, and it is work the contract describes but never assigned to anyone.
 
-Landed since this board was written: `P1` (CI), `P2` (`model/pipeline.py`), `P3` (`demo/` skeleton),
-`C7` (merge).
+Landed since this board was written: `P1` (CI), `P2`/`A12` (`model/pipeline.py`), `P3` (`demo/` skeleton),
+`C7` (merge), `A1`–`A13` (Member A complete: `crc32.v`, `deframer.v`, `parser.v`, `uart_rx.v`, `uart_tx.v`),
+`B1`–`B12` (Member B complete), `C8`–`C18` (Member C complete), `D1`–`D8` (Member D complete).
 
 ---
 
@@ -106,12 +104,12 @@ Nobody's guide claims these, which is why none of them exist. Assign them.
 - [x] `A6` Review and adopt `rtl/control/reason_codes.vh` (drafted by C) · adopted and signed off
 - [x] `A7` Strobe-based drop-engine sync (latency-agnostic by construction) + target latencies · locked in §6
 - [x] `A1` **Freeze `interface_contract.md`** — v1.0.0 locked · **Phase I exit**
-- [ ] `A8` `uart_rx.v` / `uart_tx.v` at 3 Mbaud against 100 MHz
-- [ ] `A9` `crc32.v`, verified bit-for-bit against `zlib.crc32`
-- [ ] `A10` `deframer.v` — multi-packet, truncation, min/max length · unblocked by `A1`
-- [ ] `A12` `model/pipeline.py` header-parsing function (the parser's oracle) · unblocked by `A1`
-- [ ] `A11` `parser.v` — Ethernet → IPv4 → TCP/UDP onto the packet bus · **Phase II exit** · ⛔ waiting on `A12`
-- [ ] `A13` cocotb: 20+ packets incl. malformed, RTL ≡ Python · **Phase II exit** · ⛔ waiting on `A11`
+- [x] `A8` `uart_rx.v` / `uart_tx.v` at 3 Mbaud against 100 MHz · completed and verified
+- [x] `A9` `crc32.v`, verified bit-for-bit against `zlib.crc32`
+- [x] `A10` `deframer.v` — multi-packet, truncation, min/max length · completed and verified
+- [x] `A12` `model/pipeline.py` header-parsing function (the parser's oracle) · unblocked by `A1` · unblocks `B6`, `A11`
+- [x] `A11` `parser.v` — Ethernet → IPv4 → TCP/UDP onto the packet bus · **Phase II exit** · unblocked by `A12`
+- [x] `A13` cocotb: 20+ packets incl. malformed, RTL ≡ Python · **Phase II exit** · verified bit-for-bit against model/pipeline.py
 
 **Note on `A10`:** Member C requires the *complete* handshake payload before `eof` — a truncated
 payload presented as complete is worse than a `FRAME_TIMEOUT`. This is now a hard requirement from a
