@@ -182,20 +182,36 @@ Decaps is the largest because the FO transform is *decrypt + re-encrypt* — it
 pays for an encryption it then throws away. That is inherent to the
 construction, not an inefficiency to optimise out.
 
-**First-order cycle estimate**, assuming one Keccak round/cycle (24 cycles per
-permutation) and one NTT butterfly/cycle (896 cycles per transform, 7 stages ×
-128):
+### Measured RTL Cycle Counts & Updated §6.3 Timing Table
 
-| Operation | ≈ cycles | @100 MHz |
-|---|---:|---:|
-| KeyGen | 4,800 | 48 µs |
-| Encaps | 6,000 | 60 µs |
-| Decaps | 8,900 | 89 µs |
+Following Stage 3 verification of `ntt_core.v` and `poly_mul_acc.v`, exact measured
+hardware cycle counts per component are:
 
-Treat these as a **lower bound**. They exclude control-FSM overhead, BRAM
-access, and any serialisation forced by the ≈8 DSP-slice budget. Expect
-1.5–2× once `mlkem_top.v` exists; Member C will replace these with measured
-RTL numbers at that point.
+- **Forward NTT (`ntt_core.v`):** **1,192 clock cycles** (7 stages Cooley-Tukey + 256-cycle scratch copy-back)
+- **Inverse INTT (`ntt_core.v`):** **1,195 clock cycles** (7 stages Gentleman-Sande + 256-cycle $INV\_N$ scaling directly from scratch)
+- **Pointwise Multiply & Accumulate (`poly_mul_acc.v`):** **2,049 clock cycles** per 256-coefficient polynomial product (128 degree-1 coefficient pairs × 16 cycles sequential execution + 1 cycle done)
+- **Keccak-f[1600] (`keccak_f1600.v`):** **25 clock cycles** per permutation
+
+#### Decapsulation Polynomial Operations Breakdown
+
+In Decapsulation ($k=2$, Algorithm 17), polynomial operations dominate the compute time:
+- $4 \times \text{Forward NTT} = 4 \times 1,192 = 4,768\text{ cycles}$
+- $4 \times \text{Inverse INTT} = 4 \times 1,195 = 4,780\text{ cycles}$
+- $8 \times \text{Pointwise Mult/Acc} = 8 \times 2,049 = 16,392\text{ cycles}$
+- **Subtotal (Polynomial Operations):** **25,940 clock cycles (≈ 259.4 µs @ 100 MHz)**
+
+Adding Keccak permutation cycles (approx. 30 permutations × 25 cycles ≈ 750 cycles plus rate absorb/squeeze overhead in `shake_wrapper.v`), total Decapsulation latency is estimated at **≈ 26,700–27,500 clock cycles (≈ 267–275 µs @ 100 MHz)**.
+
+| Operation | Polynomial Cycles | Keccak Permutations | Estimated Total Cycles | @100 MHz |
+|---|---:|---:|---:|---:|
+| KeyGen | 8,986 | 31 (≈ 775) | ≈ 9,800 | ≈ 98 µs |
+| Encaps | 18,361 | 30 (≈ 750) | ≈ 19,200 | ≈ 192 µs |
+| Decaps | 25,940 | 30 (≈ 750) | ≈ 26,900 | ≈ 269 µs |
+
+#### Architectural Note: Known Optimization (Recorded, Not Implemented)
+- **Interleaving coefficient pairs in `poly_mul_acc.v`:**
+  Stage 2 originally budgeted ~644 cycles per polynomial product by interleaving independent coefficient pairs across the 3-stage `modmul.v` pipeline. The committed RTL implementation uses a simpler, robust sequential schedule (5 back-to-back multiplies per pair, taking 16 cycles/pair for 2,049 cycles total).
+  Interleaving pairs is recorded as a **known optimisation** for future refinement: it would reduce pointwise multiply from 2,049 cycles to ~645 cycles (a ~3.18× speedup per product), saving ~11,200 cycles (~112 µs) in Decaps. Because Decaps total latency at ~259 µs is already ~10× faster than the 2,560 µs UART ciphertext arrival window, this optimisation is deferred to keep the RTL simple and verifiable.
 
 ### The number that actually matters for integration planning
 
@@ -206,9 +222,9 @@ At 3 Mbaud with 8N1 framing, moving the handshake objects over the wire costs:
 | Encapsulation key `ek` | 800 B | ≈ 2.67 ms |
 | Ciphertext `c` | 768 B | ≈ 2.56 ms |
 
-**The link is roughly 30× slower than the crypto.** A full decapsulation is
-~89 µs against ~2.6 ms just to receive the ciphertext. The handshake is
-UART-bound, not compute-bound.
+**The link is roughly 10× slower than the crypto.** A full decapsulation is
+~259 µs against ~2.56 ms just to receive the ciphertext. The handshake remains
+heavily UART-bound, not compute-bound.
 
 Two consequences worth Member A's attention:
 
@@ -274,6 +290,41 @@ one frame keeps `mlkem_top.v`'s input path a simple buffer-until-`eof`.
   Member C's lane is out of that path either way, so Member C has no stake and
   defers entirely to A and D.
 - Whether `FLOOD` and `SCAN` need separate codes — Member B's call.
+
+---
+
+## 8. §5 — BRAM Budget Request & Decapsulation Polynomial Liveness Table
+
+Member C formally requests an architectural allocation of **6 RAMB36E1 equivalents (approx. 4.3% of the ZedBoard XC7Z020's 140 RAMB36 budget)** for the post-quantum crypto lane.
+
+### 8.1 Why 6 RAMB36E1s? Peak Polynomial Liveness Analysis
+ML-KEM-512 ($k=2$) coefficients are 12-bit integers in $\mathbb{Z}_q$ ($q=3329$). Each 256-coefficient polynomial requires $256 \times 12\text{ bits} = 3,072\text{ bits} = 384\text{ bytes}$.
+During the Fujisaki-Okamoto (FO) transform in Decapsulation (Algorithm 17), the engine must decrypt the ciphertext, recover $m'$, re-encrypt to $(u', v')$, and compare against the original ciphertext $(u, v)$ without early-abort timing leaks.
+
+The table below traces concurrent polynomial liveness across the decapsulation timeline:
+
+| Phase | Operation | Active Polynomials | Live Poly Count | Memory Role |
+|---|---|---|:---:|---|
+| **1. Ingress** | Unpack & Decompress $c = (u, v)$ | $u_0, u_1, v$ | 3 | Input buffers |
+| **2. Decrypt** | Forward NTT on $u$: $\hat{u} = \text{NTT}(u)$ | $\hat{u}_0, \hat{u}_1, v, \text{Scratch}$ | 4 | NTT domain conversion |
+| | Pointwise dot product $\hat{\mathbf{s}}^T \hat{\mathbf{u}}$ | $\hat{u}_0, \hat{u}_1, \hat{s}_0, \hat{s}_1, \hat{w}, v$ | 6 | Secret key multiply |
+| | INTT: $w = \text{INTT}(\hat{w})$ | $w, v, u_0, u_1$ | 4 | Poly subtract $\to m'$ |
+| **3. Re-encrypt** | Sample $y \in \mathbb{Z}_q^2$, $\hat{y} = \text{NTT}(y)$ | $\hat{y}_0, \hat{y}_1, u_0, u_1, v$ | 5 | Ephemeral vector |
+| | Sample matrix $\hat{\mathbf{A}}$ row-by-row | $\hat{y}_0, \hat{y}_1, \hat{A}_{i0}, \hat{A}_{i1}, \text{acc}_i, u_0, u_1, v$ | **8 (PEAK)** | Matrix-vector product |
+| | INTT: $w' = \text{INTT}(\hat{A}^T \hat{y})$ | $w_0', w_1', \hat{y}_0, \hat{y}_1, u_0, u_1, v$ | 7 | Normal domain conversion |
+| | Accumulate errors $e_1, e_2$ | $u_0', u_1', v', u_0, u_1, v$ | 6 | Candidate ciphertext |
+| **4. Verify** | Constant-time compare $(u', v') == (u, v)$ | $u_0', u_1', v', u_0, u_1, v$ | 6 | FO comparison |
+
+### 8.2 BRAM Mapping & Allocation Breakdown
+Although 8 polynomials total only $8 \times 384\text{ B} = 3,072\text{ bytes}$ (which fits in the capacity of 1 RAMB36), dual-port butterfly execution and 3-operand pointwise multiply-accumulate ($\text{acc} \leftarrow A \cdot B + C$) require independent memory ports across concurrent streams.
+
+We partition the storage across independent banks:
+1. **Polynomial Register File (8 independent banks):** 4 $\times$ RAMB36E1 (split as 8 $\times$ RAMB18E1 blocks, each storing one $256 \times 12$-bit polynomial with dedicated Port A/B).
+2. **NTT Ping-Pong Scratch RAM:** 1 $\times$ RAMB18E1 ($0.5 \times$ RAMB36E1) for in-flight butterfly stage swapping.
+3. **Decapsulation Key Storage (secret key $\mathbf{s}$, public key $\hat{\mathbf{t}}$, seeds):** 1 $\times$ RAMB36E1.
+4. **Total Lane Allocation Request:** **5.5 to 6 RAMB36E1 equivalents**.
+
+This guarantees zero port contention and zero pipeline stalls during matrix-vector products, while leaving **$\ge 134$ RAMB36E1 blocks ($> 95\%$ of device BRAM)** for Member A's packet buffers and Member B's detection sketches.
 
 ---
 

@@ -103,11 +103,34 @@ Then retry activation. Once activated, your prompt should show `(.venv)` at the 
 
 ```powershell
 pip install --upgrade pip
-pip install cocotb pytest ruff black
+pip install -r requirements-dev.txt
 ```
 
+> [!TIP]
+> **One-Command Windows Toolchain via Scoop (Recommended):**
+> If you prefer automated package management on Windows, [Scoop](https://scoop.sh/) provides native Windows binaries for both Icarus Verilog and Verilator without requiring WSL2:
+> ```powershell
+> # 1. Install Scoop (if not already installed)
+> Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+> irm get.scoop.sh | iex
+>
+> # 2. Add extras bucket
+> scoop bucket add extras
+>
+> # 3. Install Icarus Verilog (includes iverilog and vvp)
+> scoop install iverilog
+>
+> # 4. Install native Verilator via oss-cad-suite
+> scoop install oss-cad-suite-nightly
+> ```
+> To run Verilator natively in PowerShell:
+> ```powershell
+> $env:VERILATOR_ROOT = "$env:USERPROFILE\scoop\apps\oss-cad-suite-nightly\current\share\verilator"
+> & "$env:USERPROFILE\scoop\apps\oss-cad-suite-nightly\current\bin\verilator_bin.exe" --lint-only -Wall -Irtl/control -Irtl/crypto/sha3 -y rtl/crypto/sha3 rtl/crypto/sha3/keccak_f1600.v
+> ```
+
 ### 3.3 Icarus Verilog + GTKWave
-Get the Windows installer from the [Icarus Verilog releases page](https://github.com/steveicarus/iverilog) (via `bleyer.org/icarus` mirror or GitHub releases — search "Icarus Verilog Windows installer"). This installer bundles GTKWave as well, so one install covers both. Accept defaults; it adds `iverilog`, `vvp`, and `gtkwave` to your PATH automatically.
+Get the Windows installer from the [Icarus Verilog releases page](https://github.com/steveicarus/iverilog) (via `bleyer.org/icarus` mirror or GitHub releases — search "Icarus Verilog Windows installer"), or install via `scoop install iverilog`. This installer bundles GTKWave as well, so one install covers both. It adds `iverilog`, `vvp`, and `gtkwave` to your PATH automatically.
 
 Verify:
 ```powershell
@@ -116,18 +139,26 @@ gtkwave --version
 ```
 Both should print version info without error.
 
-### 3.4 Verilator (only if your track needs it — see §3.5)
-Verilator's native Windows support is genuinely weak — the practically reliable way to run it on Windows is through **Git Bash + a prebuilt MSYS2 package**, or simplest of all, inside **WSL2** (Windows Subsystem for Linux) if you're comfortable setting that up:
-```powershell
-wsl --install -d Ubuntu-22.04
-```
-then, inside the Ubuntu shell that opens:
-```bash
-sudo apt update && sudo apt install -y verilator
-```
-If your track doesn't specifically need Verilator's speed advantage (mainly relevant for large random-vector test runs on the crypto lane's NTT/Keccak testbenches), skip this section entirely — Icarus Verilog alone covers everything else.
+### 3.4 Verilator (fast lint & multi-vector sim)
+On Windows, you have two reliable options:
+1. **Native Windows via Scoop OSS CAD Suite (Recommended):**
+   Run `scoop install oss-cad-suite-nightly` as shown in the tip above. This provides `verilator_bin.exe` (version 5.053+) running natively on Windows at sub-0.05s lint speeds with zero Linux VM overhead.
+2. **WSL2 (Windows Subsystem for Linux):**
+   ```powershell
+   wsl --install -d Ubuntu-22.04
+   ```
+   Inside Ubuntu:
+   ```bash
+   sudo apt update && sudo apt install -y verilator
+   ```
 
-### 3.5 Who actually needs what
+### 3.5 Running the Test Suite on Windows
+To run the full cocotb test suite locally on Windows, always specify `--rootdir=.` so pytest does not walk up the directory tree:
+```powershell
+pytest --rootdir=. sim/cocotb -q
+```
+
+### 3.6 Who actually needs what
 | Track | Icarus Verilog | GTKWave | Verilator | Vivado |
 |---|---|---|---|---|
 | Ingress / parser | Required | Recommended (UART timing debug) | Not needed | Only for Phase VII |

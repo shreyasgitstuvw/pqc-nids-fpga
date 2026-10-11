@@ -34,6 +34,7 @@ a.out
 sim_build/
 sim/build/
 results.xml
+test_runner.*
 
 # --- OS ---
 .DS_Store

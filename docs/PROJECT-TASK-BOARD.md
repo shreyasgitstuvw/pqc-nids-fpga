@@ -156,13 +156,16 @@ port is invisible to you. One-line confirmation, but it needs to be explicit.
 - [x] `C5` Interface response to Member A
 - [x] `C6` Contract freeze package + draft `rtl/control/reason_codes.vh`
 - [x] `C7` Push and merge `member-c/python-oracle` into `main` — PR #1 merged, branch deleted
-- [ ] `C8` `keccak_f1600.v` + `shake_wrapper.v` — decide unrolled vs iterative rounds 
-- [ ] `C9` `test_keccak.py` vs `model/sha3.py`, then FIPS 202 KAT through RTL · **Phase IV exit** · ⛔ waiting on `C8`
-- [ ] `C10` `ntt_core.v` / `butterfly.v` / `modmul.v` within the ≈8 DSP budget 
-- [ ] `C11` `test_ntt.py` — hundreds of random polys, forward∘inverse = identity · **Phase IV exit** · ⛔ waiting on `C10`
-- [ ] `C12` `cbd_sampler.v`, verified incl. seed handling · **Phase IV exit** · ⛔ waiting on `C9`
-- [ ] `C13` `compress.v` / `decompress.v` · ⛔ waiting on `C10`
-- [ ] `C14` `mlkem_top.v` — keygen / encaps / decaps state machines · ⛔ waiting on `C11`, `C12`, `C13`, `A6`
+- [x] `C8` `keccak_f1600.v` + `shake_wrapper.v` — iterative 25-cycle Keccak-f[1600] and multi-mode 64-bit sponge wrapper · verified clean Verilator lint
+- [x] `C9` `test_keccak_f1600.py` + `test_shake_wrapper.py` vs `model/sha3.py` (cocotb) · 100% green in CI
+- [x] `C9b` FIPS 202 KAT through RTL (334 NIST CAVP vectors: SHA3-256, SHA3-512, SHAKE128, SHAKE256 ShortMsg/LongMsg/VariableOut) · **Phase IV exit**
+- [x] `C10` `ntt_core.v` / `butterfly.v` / `modmul.v` within the ≈8 DSP budget (1 DSP48E1, 1 BU, 1,192 fwd / 1,195 inv cycles, 0 lint warnings)
+- [x] `C10b` `poly_mul_acc.v` — pointwise multiplication (base_case_multiply mod X^2 - gamma) and accumulation for matrix-vector products (1 DSP48E1, 2,049 cycles measured, 0 lint warnings; pair interleaving recorded as known optimisation)
+- [x] `C11` `test_ntt.py` + `test_modmul.py` + `test_poly_mul_acc.py` — bit-exact vs `model/mlkem/ntt.py` & `model/mlkem/pke.py` (cocotb) · **Phase IV exit**
+- [x] `C12` `cbd_sampler.v`, verified incl. seed handling (dual-window ping-pong, eta1=3 & eta2=2, 259/261 cycles measured, bit-exact vs model/mlkem/pke.py & FIPS 203 KAT) · **Phase IV exit**
+- [x] `C13` `compress.v` / `decompress.v` — streaming datapath for d in {1, 4, 10} (CSD shift-add, L=3/L=1 cycles, 0 DSP, bit-exact vs model/mlkem/pke.py) · **Phase IV exit**
+- [ ] `C13b` `byte_encode.v` / `byte_decode.v` — bit packing/unpacking for d in {1, 4, 10} (u, v, and message) · ⛔ waiting on `C13`
+- [ ] `C14` `mlkem_top.v` — keygen / encaps / decaps state machines · ⛔ waiting on `C11`, `C12`, `C13`, `C13b`, `A6`
 - [ ] `C15` `fo_transform.v` — structural signals, cryptographic stays silent · ⛔ waiting on `C14`
 - [ ] `C16` FIPS 203 KAT through `mlkem_top.v` — zero unexplained mismatches · **PHASE V HARD GATE** · ⛔ waiting on `C15`
 - [ ] `C17` Joint Seam-2 indistinguishability test with D · **Phase VI exit** · ⛔ waiting on `C15`, `D8`
@@ -189,17 +192,17 @@ Lower bounds — no control/memory overhead. At 3 Mbaud, receiving the 768-byte 
 > blocked until you agree those port names with them. Agreeing the names is a five-minute
 > conversation and doesn't require your RTL to exist — do it now, not when `D4` finishes.
 
-- [ ] `D3` Check proposed port numbers against test traffic, agree with A · blocks `A5` → blocks `A1`
-- [ ] `D4` `chacha20.v` — quarter-round core, RFC 8439 vectors, **plus the §3.1 plaintext output ports** · **Phase III exit** · **unblocks `B8`**
-- [ ] `D6` `model/chacha_poly.py` reference for streaming behaviour
-- [ ] `D7` `drop_engine.v` **stub** — just OR the fail bits · **Phase III exit** · **unblocks `B12`**
-- [ ] `D5` `poly1305.v` — MAC accumulator, RFC 8439 vectors · **Phase III exit** · ⛔ waiting on `D4`
-- [ ] `D2` Give A the `poly1305.v` verdict latency · blocks `A7` → blocks `A1` · ⛔ waiting on `D5`
-- [ ] `D1` Read and sign off the interface contract · ⛔ waiting on `A2`, `A3`, `A4`
-- [ ] `D8` `session_mgr.v` — write path blind to rejection · ⛔ waiting on `C6`, `A6`
-- [ ] `D10` Document the priority rule for same-cycle failures from both lanes · ⛔ waiting on `A7`
-- [ ] `D11` `chacha_poly` verified on sustained multi-packet streams · **Phase VI exit** · ⛔ waiting on `D5`, `D6`
-- [ ] `D9` `drop_engine.v` full — per-reason counters, sub-µs, nothing silent, **§6 telemetry exception (BAD_TAG suppresses the SIGNATURE count)** · **Phase VI exit** · ⛔ waiting on `A6`, `A7`, `B12`
+- [x] `D3` Check proposed port numbers against test traffic, agree with A · blocks `A5` → blocks `A1`
+- [x] `D4` `chacha20.v` — quarter-round core, RFC 8439 vectors, **plus the §3.1 plaintext output ports** · **Phase III exit** · **unblocks `B8`**
+- [x] `D6` `model/chacha_poly.py` reference for streaming behaviour
+- [x] `D7` `drop_engine.v` **stub** — just OR the fail bits · **Phase III exit** · **unblocks `B12`**
+- [x] `D5` `poly1305.v` — MAC accumulator, RFC 8439 vectors · **Phase III exit** · ⛔ waiting on `D4`
+- [x] `D2` Give A the `poly1305.v` verdict latency · blocks `A7` → blocks `A1` · ⛔ waiting on `D5`
+- [x] `D1` Read and sign off the interface contract · ⛔ waiting on `A2`, `A3`, `A4`
+- [x] `D8` `session_mgr.v` — write path blind to rejection · ⛔ waiting on `C6`, `A6`
+- [x] `D10` Document the priority rule for same-cycle failures from both lanes · ⛔ waiting on `A7`
+- [x] `D11` `chacha_poly` verified on sustained multi-packet streams · **Phase VI exit** · ⛔ waiting on `D5`, `D6`
+- [x] `D9` `drop_engine.v` full — per-reason counters, sub-µs, nothing silent, **§6 telemetry exception (BAD_TAG suppresses the SIGNATURE count)** · **Phase VI exit** · ⛔ waiting on `A6`, `A7`, `B12`
 - [ ] `D12` Wire counters to the host-visible LED/OLED interface · ⛔ waiting on `D9`
 
 **Two hard requirements on `D8`, from Member C:**
