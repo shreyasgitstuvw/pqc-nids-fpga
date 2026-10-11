@@ -41,6 +41,11 @@ module cam_matcher (
 
     wire [7:0] b0 = pt_data; // Current streaming byte
 
+    // Tag qualification sink: pt_tag_ok/pt_tag_valid are qualified in drop_engine.v (Interface Contract §3.1)
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [1:0] unused_pt_tag = {pt_tag_ok, pt_tag_valid};
+    /* verilator lint_on UNUSEDSIGNAL */
+
     // =========================================================================
     // Parallel 16-Way Signature Match Logic (1 Cycle Combinational Lookup)
     // =========================================================================

@@ -34,6 +34,11 @@ module count_min_sketch #(
     output reg  [15:0] c_host_out
 );
 
+    // Interface sink: packet bus fields unused in sketch hashing
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [40:0] unused_bus_signals = {dst_ip, protocol, eof};
+    /* verilator lint_on UNUSEDSIGNAL */
+
 // ============================================================================
 // SECTION 2: Dual BRAM Arrays and Hardware Clearing Engine
 // ============================================================================
