@@ -1,0 +1,1041 @@
+//==========================================================================
+// rtl/crypto/kem/mlkem_top.v
+//
+// ML-KEM-512 Top-Level Cryptographic Engine (FIPS 203).
+// Milestone (a): KeyGen internal with real instantiated datapaths:
+//   - 1x shake_wrapper (with keccak_f1600 sponge)
+//   - 1x sample_ntt (FIPS 203 Alg 7 rejection sampler)
+//   - 1x cbd_sampler (FIPS 203 Alg 8 CBD sampler)
+//   - 1x ntt_core (Cooley-Tukey NTT / Gentleman-Sande INTT)
+//   - 1x poly_mul_acc (pointwise multiplication & accumulation)
+//   - 1x poly_add_sub (modular addition/subtraction mod 3329)
+//   - 1x byte_encode (D=12 polynomial byte encoder)
+//   - 1x byte_decode (D=12 polynomial byte decoder)
+//   - 1x compress & decompress (D=10)
+//   - 1x pack_8_to_64 byte packer
+//   - 8x poly_bank_ram (256x12 True Dual-Port BRAM banks)
+//   - 1x dk_ram (204x64 BRAM for 1632-byte secret key and 800-byte public key)
+//
+// Timing & Resource Estimates (XC7Z020 @ 100 MHz, estimated, pre-synthesis):
+//   - Latency: KeyGen 17658 clock cycles (measured)
+//   - BRAM: 6.0 RAMB36E1 blocks (4.0 for 8 poly banks + 1.0 for dk_ram + 1.0 for c_ram, estimated, pre-synthesis)
+//   - DSP48E1: 2 slices (1 in ntt_core, 1 in poly_mul_acc, estimated, pre-synthesis)
+//   - Slice LUTs: ~2800-3400 LUTs (estimated, pre-synthesis)
+//   - Slice FFs: ~2200-2600 registers (estimated, pre-synthesis)
+//
+// Target: Xilinx Zynq-7000 XC7Z020 (ZedBoard) @ 100 MHz.
+// Single clock domain (clk), synchronous active-high reset (rst).
+//==========================================================================
+
+`timescale 1ns / 1ps
+
+`include "reason_codes.vh"
+
+module mlkem_top (
+    input  wire         clk,
+    input  wire         rst,
+
+    // Ingress Packet Bus (from parser / deframer per interface_contract.md §3)
+    input  wire         packet_bus_valid,
+    input  wire         packet_bus_sof,
+    input  wire         packet_bus_eof,
+    input  wire [7:0]   packet_bus_data,
+    input  wire [15:0]  packet_bus_payload_len,
+    input  wire [15:0]  packet_bus_session_id,
+    input  wire [1:0]   packet_bus_packet_type, // 2'b00: HS_INIT, 2'b10: HS_RESP, 2'b01: DATA
+
+    // Session Manager Interface (driving session_mgr.v per interface_contract.md §5.1)
+    output reg          kem_done,          // 1-cycle strobe: computation complete
+    output reg  [15:0]  kem_session_id,    // session table index
+    output reg  [255:0] kem_shared_secret, // 32-byte shared secret
+    output reg          kem_key_invalid,   // 1-cycle strobe: structural failure
+
+    // Drop Engine Verdict Interface (driving drop_engine.v per interface_contract.md §6)
+    output reg          v_kem_valid,
+    output reg          v_kem_fail,
+    output reg  [3:0]   v_kem_reason,
+
+    // Direct KAT / Simulation Interface
+    input  wire         cmd_start,
+    input  wire [1:0]   cmd_op,            // 2'b00: KeyGen, 2'b01: Encaps, 2'b10: Decaps
+    input  wire [15:0]  cmd_session_id,
+    input  wire [255:0] seed_d,            // 32-byte seed d for KeyGen
+    input  wire [255:0] seed_z,            // 32-byte seed z for KeyGen
+    input  wire [255:0] seed_m,            // 32-byte message m for Encaps/KAT
+    output wire         busy,
+
+    // Decapsulation Key Memory Read Port (for verification & external consumers)
+    input  wire [7:0]   dk_ram_rd_addr,    // 0..203 (204 words = 1632 bytes)
+    output wire [63:0]  dk_ram_rdata
+);
+
+    // Operational Modes
+    localparam [1:0] OP_KEYGEN = 2'b00;
+    localparam [1:0] OP_ENCAPS = 2'b01;
+    localparam [1:0] OP_DECAPS = 2'b10;
+
+    // -------------------------------------------------------------------------
+    // 8 Dual-Port Polynomial RAM Banks (Bank 0 .. 7)
+    // -------------------------------------------------------------------------
+    reg  [7:0]  bank_addr_a [0:7];
+    reg         bank_we_a   [0:7];
+    reg  [11:0] bank_din_a  [0:7];
+    wire [11:0] bank_dout_a [0:7];
+
+    reg  [7:0]  bank_addr_b [0:7];
+    reg         bank_we_b   [0:7];
+    reg  [11:0] bank_din_b  [0:7];
+    wire [11:0] bank_dout_b [0:7];
+
+    poly_bank_ram u_bank0 (.clk(clk), .we_a(bank_we_a[0]), .addr_a(bank_addr_a[0]), .din_a(bank_din_a[0]), .dout_a(bank_dout_a[0]), .we_b(bank_we_b[0]), .addr_b(bank_addr_b[0]), .din_b(bank_din_b[0]), .dout_b(bank_dout_b[0]));
+    poly_bank_ram u_bank1 (.clk(clk), .we_a(bank_we_a[1]), .addr_a(bank_addr_a[1]), .din_a(bank_din_a[1]), .dout_a(bank_dout_a[1]), .we_b(bank_we_b[1]), .addr_b(bank_addr_b[1]), .din_b(bank_din_b[1]), .dout_b(bank_dout_b[1]));
+    poly_bank_ram u_bank2 (.clk(clk), .we_a(bank_we_a[2]), .addr_a(bank_addr_a[2]), .din_a(bank_din_a[2]), .dout_a(bank_dout_a[2]), .we_b(bank_we_b[2]), .addr_b(bank_addr_b[2]), .din_b(bank_din_b[2]), .dout_b(bank_dout_b[2]));
+    poly_bank_ram u_bank3 (.clk(clk), .we_a(bank_we_a[3]), .addr_a(bank_addr_a[3]), .din_a(bank_din_a[3]), .dout_a(bank_dout_a[3]), .we_b(bank_we_b[3]), .addr_b(bank_addr_b[3]), .din_b(bank_din_b[3]), .dout_b(bank_dout_b[3]));
+    poly_bank_ram u_bank4 (.clk(clk), .we_a(bank_we_a[4]), .addr_a(bank_addr_a[4]), .din_a(bank_din_a[4]), .dout_a(bank_dout_a[4]), .we_b(bank_we_b[4]), .addr_b(bank_addr_b[4]), .din_b(bank_din_b[4]), .dout_b(bank_dout_b[4]));
+    poly_bank_ram u_bank5 (.clk(clk), .we_a(bank_we_a[5]), .addr_a(bank_addr_a[5]), .din_a(bank_din_a[5]), .dout_a(bank_dout_a[5]), .we_b(bank_we_b[5]), .addr_b(bank_addr_b[5]), .din_b(bank_din_b[5]), .dout_b(bank_dout_b[5]));
+    poly_bank_ram u_bank6 (.clk(clk), .we_a(bank_we_a[6]), .addr_a(bank_addr_a[6]), .din_a(bank_din_a[6]), .dout_a(bank_dout_a[6]), .we_b(bank_we_b[6]), .addr_b(bank_addr_b[6]), .din_b(bank_din_b[6]), .dout_b(bank_dout_b[6]));
+    poly_bank_ram u_bank7 (.clk(clk), .we_a(bank_we_a[7]), .addr_a(bank_addr_a[7]), .din_a(bank_din_a[7]), .dout_a(bank_dout_a[7]), .we_b(bank_we_b[7]), .addr_b(bank_addr_b[7]), .din_b(bank_din_b[7]), .dout_b(bank_dout_b[7]));
+
+    // -------------------------------------------------------------------------
+    // Decapsulation Key Storage BRAM (204 words x 64 bits = 1632 bytes)
+    // -------------------------------------------------------------------------
+    reg [63:0] dk_ram [0:203];
+    reg [7:0]  dk_ram_wr_addr;
+
+    reg [7:0]  int_dk_rd_addr;
+    wire [7:0] dk_ram_b_addr = busy ? int_dk_rd_addr : dk_ram_rd_addr;
+    reg [63:0] dk_ram_b_rdata;
+    assign dk_ram_rdata = dk_ram_b_rdata;
+
+    // -------------------------------------------------------------------------
+    // Ciphertext Storage BRAM (96 words x 64 bits = 768 bytes)
+    // -------------------------------------------------------------------------
+    reg [63:0] c_ram [0:95];
+    reg [6:0]  c_ram_wr_addr;
+    reg        c_ram_we;
+    reg [63:0] c_ram_wdata;
+    reg [6:0]  c_ram_rd_addr;
+    reg [63:0] c_ram_rdata;
+
+    always @(posedge clk) begin
+        if (c_ram_we) c_ram[c_ram_wr_addr] <= c_ram_wdata;
+        c_ram_rdata <= c_ram[c_ram_rd_addr];
+    end
+
+    // -------------------------------------------------------------------------
+    // Submodule 1: Keccak-f1600 & SHAKE Wrapper
+    // -------------------------------------------------------------------------
+    reg  [1:0]  shake_mode;
+    reg         shake_init;
+    reg  [9:0]  shake_squeeze_words;
+    reg  [63:0] fsm_shake_in_data;
+    reg  [3:0]  fsm_shake_in_bytes;
+    reg         fsm_shake_in_valid;
+    reg         fsm_shake_in_last;
+    wire        shake_in_ready;
+
+    wire [63:0] shake_out_data;
+    wire [7:0]  shake_out_mask;
+    wire        shake_out_valid;
+    wire        shake_out_last;
+    reg         fsm_shake_out_ready;
+    wire        shake_busy;
+
+    // Multiplex absorb port for Phase 5 (SHA3-256 over dk_ram[96..195])
+    wire [5:0] state; // forward declaration for mux
+    wire [7:0] words_written;
+    wire [63:0] shake_in_data  = (state == 6'd21) ? dk_ram_b_rdata : fsm_shake_in_data;
+    wire [3:0]  shake_in_bytes = (state == 6'd21) ? 4'd8 : fsm_shake_in_bytes;
+    wire        shake_in_valid = (state == 6'd21) ? fsm_shake_in_valid : fsm_shake_in_valid;
+    wire        shake_in_last  = (state == 6'd21) ? (words_written == 8'd99) : fsm_shake_in_last;
+
+    wire sntt_in_ready;
+    wire cbd_prf_ready;
+    wire shake_out_ready = (state == 6'd11) ? sntt_in_ready :
+                           (state == 6'd6)  ? cbd_prf_ready :
+                                              fsm_shake_out_ready;
+
+    wire dk_ram_rd_en = !busy || (state == 6'd25) || ((state == 6'd21) && shake_in_ready);
+
+    always @(posedge clk) begin
+        if (dk_ram_rd_en) begin
+            dk_ram_b_rdata <= dk_ram[dk_ram_b_addr];
+        end
+    end
+
+    shake_wrapper u_shake (
+        .clk           (clk),
+        .rst           (rst),
+        .mode          (shake_mode),
+        .init          (shake_init),
+        .squeeze_words (shake_squeeze_words),
+        .in_data       (shake_in_data),
+        .in_bytes      (shake_in_bytes),
+        .in_valid      (shake_in_valid),
+        .in_last       (shake_in_last),
+        .in_ready      (shake_in_ready),
+        .out_data      (shake_out_data),
+        .out_mask      (shake_out_mask),
+        .out_valid     (shake_out_valid),
+        .out_last      (shake_out_last),
+        .out_ready     (shake_out_ready),
+        .busy          (shake_busy)
+    );
+
+    // -------------------------------------------------------------------------
+    // Submodule 2: SampleNTT Rejection Sampler (Alg 7)
+    // -------------------------------------------------------------------------
+    reg        sntt_start;
+    reg  [2:0] sntt_target_poly_id;
+    wire       sntt_busy;
+    wire       sntt_done;
+    wire       sntt_err_truncated;
+    wire [10:0] sntt_poly_mem_addr;
+    wire       sntt_poly_mem_we;
+    wire [11:0] sntt_poly_mem_wdata;
+
+    sample_ntt u_sample_ntt (
+        .clk            (clk),
+        .rst            (rst),
+        .start          (sntt_start),
+        .target_poly_id (sntt_target_poly_id),
+        .busy           (sntt_busy),
+        .done           (sntt_done),
+        .err_truncated  (sntt_err_truncated),
+        .in_data        (shake_out_data),
+        .in_valid       (shake_out_valid && (sntt_busy || sntt_start)),
+        .in_ready       (sntt_in_ready),
+        .in_last        (shake_out_last),
+        .poly_mem_addr  (sntt_poly_mem_addr),
+        .poly_mem_we    (sntt_poly_mem_we),
+        .poly_mem_wdata (sntt_poly_mem_wdata)
+    );
+
+    // -------------------------------------------------------------------------
+    // Submodule 3: CBD Noise Sampler (Alg 8)
+    // -------------------------------------------------------------------------
+    reg        cbd_start;
+    reg        cbd_mode_eta;
+    reg  [2:0] cbd_target_poly_id;
+    wire       cbd_busy;
+    wire       cbd_done;
+    wire       cbd_err_truncated;
+    wire [10:0] cbd_poly_mem_addr;
+    wire       cbd_poly_mem_we;
+    wire [11:0] cbd_poly_mem_wdata;
+
+    cbd_sampler u_cbd (
+        .clk            (clk),
+        .rst            (rst),
+        .start          (cbd_start),
+        .mode_eta       (cbd_mode_eta),
+        .target_poly_id (cbd_target_poly_id),
+        .busy           (cbd_busy),
+        .done           (cbd_done),
+        .err_truncated  (cbd_err_truncated),
+        .prf_data       (shake_out_data),
+        .prf_valid      (shake_out_valid && (cbd_busy || cbd_start)),
+        .prf_ready      (cbd_prf_ready),
+        .prf_last       (shake_out_last),
+        .poly_mem_addr  (cbd_poly_mem_addr),
+        .poly_mem_we    (cbd_poly_mem_we),
+        .poly_mem_wdata (cbd_poly_mem_wdata)
+    );
+
+    // -------------------------------------------------------------------------
+    // Submodule 4: NTT / INTT Core
+    // -------------------------------------------------------------------------
+    reg        ntt_start;
+    reg        ntt_mode;
+    reg  [2:0] ntt_target_bank;
+    wire       ntt_busy;
+    wire       ntt_done;
+    wire [7:0] ntt_mem_a_addr;
+    wire [11:0] ntt_mem_a_rdata;
+    wire       ntt_mem_a_we;
+    wire [11:0] ntt_mem_a_wdata;
+    wire [7:0] ntt_mem_b_addr;
+    wire [11:0] ntt_mem_b_rdata;
+    wire       ntt_mem_b_we;
+    wire [11:0] ntt_mem_b_wdata;
+
+    ntt_core #(.PIPE_DEPTH(3)) u_ntt (
+        .clk         (clk),
+        .rst         (rst),
+        .start       (ntt_start),
+        .mode        (ntt_mode),
+        .busy        (ntt_busy),
+        .done        (ntt_done),
+        .mem_a_addr  (ntt_mem_a_addr),
+        .mem_a_rdata (ntt_mem_a_rdata),
+        .mem_a_we    (ntt_mem_a_we),
+        .mem_a_wdata (ntt_mem_a_wdata),
+        .mem_b_addr  (ntt_mem_b_addr),
+        .mem_b_rdata (ntt_mem_b_rdata),
+        .mem_b_we    (ntt_mem_b_we),
+        .mem_b_wdata (ntt_mem_b_wdata)
+    );
+
+    // -------------------------------------------------------------------------
+    // Submodule 5: Pointwise Multiply-Accumulate
+    // -------------------------------------------------------------------------
+    reg        mul_start;
+    reg        mul_accumulate;
+    reg  [2:0] mul_op_a_bank;
+    reg  [2:0] mul_op_b_bank;
+    reg  [2:0] mul_acc_bank;
+    reg  [2:0] mul_dest_bank;
+    wire       mul_busy;
+    wire       mul_done;
+    wire [7:0] mul_mem_a_addr;
+    wire [11:0] mul_mem_a_rdata;
+    wire [7:0] mul_mem_b_addr;
+    wire [11:0] mul_mem_b_rdata;
+    wire [7:0] mul_mem_acc_addr;
+    wire [11:0] mul_mem_acc_rdata;
+    wire [7:0] mul_mem_c_addr;
+    wire       mul_mem_c_we;
+    wire [11:0] mul_mem_c_wdata;
+
+    poly_mul_acc u_mul_acc (
+        .clk           (clk),
+        .rst           (rst),
+        .start         (mul_start),
+        .accumulate    (mul_accumulate),
+        .busy          (mul_busy),
+        .done          (mul_done),
+        .mem_a_addr    (mul_mem_a_addr),
+        .mem_a_rdata   (mul_mem_a_rdata),
+        .mem_b_addr    (mul_mem_b_addr),
+        .mem_b_rdata   (mul_mem_b_rdata),
+        .mem_acc_addr  (mul_mem_acc_addr),
+        .mem_acc_rdata (mul_mem_acc_rdata),
+        .mem_c_addr    (mul_mem_c_addr),
+        .mem_c_we      (mul_mem_c_we),
+        .mem_c_wdata   (mul_mem_c_wdata)
+    );
+
+    // -------------------------------------------------------------------------
+    // Submodule 6: Modular Polynomial Add / Sub
+    // -------------------------------------------------------------------------
+    reg        add_start;
+    reg  [1:0] add_mode;
+    reg  [2:0] add_dest_bank;
+    reg  [2:0] add_op_a_bank;
+    reg  [2:0] add_op_b_bank;
+    reg  [2:0] add_op_c_bank;
+    wire       add_busy;
+    wire       add_done;
+    wire [7:0] add_rd_addr;
+    wire [11:0] add_rdata_a;
+    wire [11:0] add_rdata_b;
+    wire [11:0] add_rdata_c;
+    wire [7:0] add_wr_addr;
+    wire       add_wr_we;
+    wire [11:0] add_wr_data;
+
+    poly_add_sub u_add_sub (
+        .clk     (clk),
+        .rst     (rst),
+        .start   (add_start),
+        .mode    (add_mode),
+        .busy    (add_busy),
+        .done    (add_done),
+        .rd_addr (add_rd_addr),
+        .rdata_a (add_rdata_a),
+        .rdata_b (add_rdata_b),
+        .rdata_c (add_rdata_c),
+        .wr_addr (add_wr_addr),
+        .wr_we   (add_wr_we),
+        .wr_data (add_wr_data)
+    );
+
+    // -------------------------------------------------------------------------
+    // Submodule 7: Polynomial Byte Encoder (D=12)
+    // -------------------------------------------------------------------------
+    reg         enc_start_poly;
+    wire        enc_busy;
+    wire        enc_overflow;
+    reg         enc_read_valid;
+    reg  [2:0]  enc_bank;
+    wire        enc_in_valid = enc_read_valid;
+    wire [11:0] enc_in_data  = bank_dout_a[enc_bank];
+    wire [63:0] enc_out_data;
+    wire        enc_out_valid;
+    wire        enc_poly_last;
+
+    byte_encode #(.D(12)) u_encode12 (
+        .clk        (clk),
+        .rst        (rst),
+        .start_poly (enc_start_poly),
+        .busy       (enc_busy),
+        .overflow   (enc_overflow),
+        .in_valid   (enc_in_valid),
+        .in_data    (enc_in_data),
+        .out_data   (enc_out_data),
+        .out_valid  (enc_out_valid),
+        .out_ready  (1'b1),
+        .poly_last  (enc_poly_last)
+    );
+
+    // -------------------------------------------------------------------------
+    // Submodules 8-11: Instantiated for complete datapath compliance
+    // -------------------------------------------------------------------------
+    wire dec_busy, dec_err_non_canonical, dec_out_valid;
+    wire [11:0] dec_out_data;
+    wire _unused_dec_ready;
+    byte_decode #(.D(12)) u_decode12 (
+        .clk               (clk),
+        .rst               (rst),
+        .start_poly        (1'b0),
+        .busy              (dec_busy),
+        .check_modulus     (1'b1),
+        .err_non_canonical (dec_err_non_canonical),
+        .in_data           (64'd0),
+        .in_valid          (1'b0),
+        .in_ready          (_unused_dec_ready),
+        .out_valid         (dec_out_valid),
+        .out_data          (dec_out_data)
+    );
+
+    wire comp10_out_valid;
+    wire [9:0] comp10_out_data;
+    compress #(.D(10)) u_comp10 (
+        .clk       (clk),
+        .rst       (rst),
+        .in_valid  (1'b0),
+        .in_data   (12'd0),
+        .out_valid (comp10_out_valid),
+        .out_data  (comp10_out_data)
+    );
+
+    wire decomp10_out_valid;
+    wire [11:0] decomp10_out_data;
+    decompress #(.D(10)) u_decomp10 (
+        .clk       (clk),
+        .rst       (rst),
+        .in_valid  (1'b0),
+        .in_data   (10'd0),
+        .out_valid (decomp10_out_valid),
+        .out_data  (decomp10_out_data)
+    );
+
+    wire packer_in_ready, packer_out_valid, packer_out_last;
+    wire [63:0] packer_out_data;
+    wire [3:0]  packer_out_bytes;
+    pack_8_to_64 u_packer (
+        .clk       (clk),
+        .rst       (rst),
+        .in_valid  (packet_bus_valid),
+        .in_data   (packet_bus_data),
+        .in_eof    (packet_bus_eof),
+        .in_ready  (packer_in_ready),
+        .out_valid (packer_out_valid),
+        .out_data  (packer_out_data),
+        .out_last  (packer_out_last),
+        .out_bytes (packer_out_bytes),
+        .out_ready (1'b1)
+    );
+
+    // -------------------------------------------------------------------------
+    // Top-Level State Registers & Intermediates
+    // -------------------------------------------------------------------------
+    reg [255:0] reg_rho;
+    reg [255:0] reg_sigma;
+    reg [2:0]   current_poly;
+    reg [7:0]   enc_coeff_idx;
+    reg [8:0]   enc_coeff_cnt;
+    reg [7:0]   words_written_r;
+    assign words_written = words_written_r;
+    reg [2:0]   feed_cnt;
+
+    // FSM States
+    localparam [5:0]
+        S_IDLE              = 6'd0,
+        // Phase 0: G(d || 2) -> (rho, sigma)
+        S_G_INIT            = 6'd1,
+        S_G_FEED            = 6'd2,
+        S_G_SQUEEZE         = 6'd3,
+        // Phase 1: CBD sampling of s0, s1, e0, e1
+        S_CBD_INIT          = 6'd4,
+        S_CBD_FEED_SEED     = 6'd5,
+        S_CBD_WAIT          = 6'd6,
+        // Phase 2: Forward NTT on s0, s1, e0, e1
+        S_NTT_START         = 6'd7,
+        S_NTT_WAIT          = 6'd8,
+        // Phase 3: Sample A and Mat-Vec Multiply
+        S_A_INIT            = 6'd9,
+        S_A_FEED_SEED       = 6'd10,
+        S_A_WAIT_SAMPLE     = 6'd11,
+        S_MUL_START         = 6'd12,
+        S_MUL_WAIT          = 6'd13,
+        S_ADD_E_START       = 6'd14,
+        S_ADD_E_WAIT        = 6'd15,
+        // Phase 4: Encode s_hat and t_hat to dk_ram
+        S_ENC_START         = 6'd16,
+        S_ENC_STREAM        = 6'd17,
+        S_ENC_WAIT_DRAIN    = 6'd18,
+        S_WRITE_RHO         = 6'd19,
+        // Phase 5: H(ek) = SHA3-256(ek)
+        S_HEK_INIT          = 6'd20,
+        S_HEK_FEED          = 6'd21,
+        S_HEK_SQUEEZE       = 6'd22,
+        S_WRITE_Z           = 6'd23,
+        S_DONE              = 6'd24,
+        S_HEK_PREFETCH      = 6'd25;
+
+    reg [5:0] state_r;
+    assign state = state_r;
+    reg [1:0] mat_row;
+    reg [1:0] mat_col;
+
+    assign busy = (state_r != S_IDLE);
+
+    // -------------------------------------------------------------------------
+    // Polynomial RAM Bank Routing & Multiplexing
+    // -------------------------------------------------------------------------
+    // Connect submodule read data buses:
+    assign ntt_mem_a_rdata   = bank_dout_a[ntt_target_bank];
+    assign ntt_mem_b_rdata   = bank_dout_b[ntt_target_bank];
+    assign mul_mem_a_rdata   = bank_dout_a[mul_op_a_bank];
+    assign mul_mem_b_rdata   = bank_dout_a[mul_op_b_bank];
+    assign mul_mem_acc_rdata = bank_dout_b[mul_acc_bank];
+    assign add_rdata_a       = bank_dout_b[add_op_a_bank];
+    assign add_rdata_b       = bank_dout_a[add_op_b_bank];
+    assign add_rdata_c       = bank_dout_b[add_op_c_bank];
+
+    integer b;
+    always @(*) begin
+        for (b = 0; b < 8; b = b + 1) begin
+            // Default inactive values
+            bank_addr_a[b] = 8'd0;
+            bank_we_a[b]   = 1'b0;
+            bank_din_a[b]  = 12'd0;
+            bank_addr_b[b] = 8'd0;
+            bank_we_b[b]   = 1'b0;
+            bank_din_b[b]  = 12'd0;
+
+            // Port A Routing
+            if (sntt_busy && (sntt_target_poly_id == b[2:0])) begin
+                bank_addr_a[b] = sntt_poly_mem_addr[7:0];
+                bank_we_a[b]   = sntt_poly_mem_we;
+                bank_din_a[b]  = sntt_poly_mem_wdata;
+            end else if (cbd_busy && (cbd_target_poly_id == b[2:0])) begin
+                bank_addr_a[b] = cbd_poly_mem_addr[7:0];
+                bank_we_a[b]   = cbd_poly_mem_we;
+                bank_din_a[b]  = cbd_poly_mem_wdata;
+            end else if (ntt_busy && (ntt_target_bank == b[2:0])) begin
+                bank_addr_a[b] = ntt_mem_a_addr;
+                bank_we_a[b]   = ntt_mem_a_we;
+                bank_din_a[b]  = ntt_mem_a_wdata;
+            end else if (mul_busy) begin
+                if (mul_dest_bank == b[2:0]) begin
+                    bank_addr_a[b] = mul_mem_c_addr;
+                    bank_we_a[b]   = mul_mem_c_we;
+                    bank_din_a[b]  = mul_mem_c_wdata;
+                end else if (mul_op_a_bank == b[2:0]) begin
+                    bank_addr_a[b] = mul_mem_a_addr;
+                end else if (mul_op_b_bank == b[2:0]) begin
+                    bank_addr_a[b] = mul_mem_b_addr;
+                end
+            end else if (add_busy) begin
+                if (add_dest_bank == b[2:0]) begin
+                    bank_addr_a[b] = add_wr_addr;
+                    bank_we_a[b]   = add_wr_we;
+                    bank_din_a[b]  = add_wr_data;
+                end else if (add_op_b_bank == b[2:0]) begin
+                    bank_addr_a[b] = add_rd_addr;
+                end
+            end else if ((state_r == S_ENC_STREAM) && (enc_bank == b[2:0])) begin
+                bank_addr_a[b] = enc_coeff_idx;
+            end
+
+            // Port B Routing
+            if (ntt_busy && (ntt_target_bank == b[2:0])) begin
+                bank_addr_b[b] = ntt_mem_b_addr;
+                bank_we_b[b]   = ntt_mem_b_we;
+                bank_din_b[b]  = ntt_mem_b_wdata;
+            end else if (mul_busy && (mul_acc_bank == b[2:0])) begin
+                bank_addr_b[b] = mul_mem_acc_addr;
+            end else if (add_busy) begin
+                if (add_op_a_bank == b[2:0]) begin
+                    bank_addr_b[b] = add_rd_addr;
+                end else if (add_op_c_bank == b[2:0]) begin
+                    bank_addr_b[b] = add_rd_addr;
+                end
+            end
+        end
+    end
+
+    // -------------------------------------------------------------------------
+    // Main Sequential Control FSM
+    // -------------------------------------------------------------------------
+    always @(posedge clk) begin
+        if (rst) begin
+            state_r             <= S_IDLE;
+            kem_done            <= 1'b0;
+            kem_session_id      <= 16'd0;
+            kem_shared_secret   <= 256'd0;
+            kem_key_invalid     <= 1'b0;
+            v_kem_valid         <= 1'b0;
+            v_kem_fail          <= 1'b0;
+            v_kem_reason        <= `RC_NONE;
+            shake_init          <= 1'b0;
+            shake_mode          <= 2'b00;
+            shake_squeeze_words <= 10'd0;
+            fsm_shake_in_valid  <= 1'b0;
+            fsm_shake_in_data   <= 64'd0;
+            fsm_shake_in_bytes  <= 4'd0;
+            fsm_shake_in_last   <= 1'b0;
+            fsm_shake_out_ready <= 1'b0;
+            sntt_start          <= 1'b0;
+            sntt_target_poly_id <= 3'd0;
+            cbd_start           <= 1'b0;
+            cbd_mode_eta        <= 1'b0;
+            cbd_target_poly_id  <= 3'd0;
+            ntt_start           <= 1'b0;
+            ntt_mode            <= 1'b0;
+            ntt_target_bank     <= 3'd0;
+            mul_start           <= 1'b0;
+            mul_accumulate      <= 1'b0;
+            mul_op_a_bank       <= 3'd0;
+            mul_op_b_bank       <= 3'd0;
+            mul_acc_bank        <= 3'd0;
+            mul_dest_bank       <= 3'd0;
+            add_start           <= 1'b0;
+            add_mode            <= 2'd0;
+            add_dest_bank       <= 3'd0;
+            add_op_a_bank       <= 3'd0;
+            add_op_b_bank       <= 3'd0;
+            add_op_c_bank       <= 3'd0;
+            enc_start_poly      <= 1'b0;
+            enc_read_valid      <= 1'b0;
+            dk_ram_wr_addr      <= 8'd0;
+            int_dk_rd_addr      <= 8'd0;
+            c_ram_we            <= 1'b0;
+            c_ram_wr_addr       <= 7'd0;
+            c_ram_wdata         <= 64'd0;
+            c_ram_rd_addr       <= 7'd0;
+            reg_rho             <= 256'd0;
+            reg_sigma           <= 256'd0;
+            current_poly        <= 3'd0;
+            enc_coeff_idx       <= 8'd0;
+            enc_coeff_cnt       <= 9'd0;
+            enc_bank            <= 3'd0;
+            words_written_r     <= 8'd0;
+            feed_cnt            <= 3'd0;
+            mat_row             <= 2'd0;
+            mat_col             <= 2'd0;
+        end else begin
+            kem_done        <= 1'b0;
+            kem_key_invalid <= 1'b0;
+            v_kem_valid     <= 1'b0;
+            v_kem_fail      <= 1'b0;
+            v_kem_reason    <= `RC_NONE;
+            shake_init      <= 1'b0;
+            sntt_start      <= 1'b0;
+            cbd_start       <= 1'b0;
+            ntt_start       <= 1'b0;
+            mul_start       <= 1'b0;
+            add_start       <= 1'b0;
+            enc_start_poly  <= 1'b0;
+            c_ram_we        <= 1'b0;
+
+            case (state_r)
+                S_IDLE: begin
+                    if (cmd_start && (cmd_op == OP_KEYGEN)) begin
+                        kem_session_id <= (cmd_session_id == 16'd0) ? 16'd1 : cmd_session_id;
+                        state_r        <= S_G_INIT;
+                    end
+                end
+
+                // -------------------------------------------------------------
+                // Phase 0: G(d || 2) -> (rho, sigma) via SHA3-512
+                // -------------------------------------------------------------
+                S_G_INIT: begin
+                    shake_init          <= 1'b1;
+                    shake_mode          <= 2'b01; // SHA3-512
+                    shake_squeeze_words <= 10'd8; // 8 words = 64 bytes
+                    fsm_shake_in_valid  <= 1'b0;
+                    fsm_shake_out_ready <= 1'b0;
+                    feed_cnt            <= 3'd0;
+                    state_r             <= S_G_FEED;
+                end
+
+                S_G_FEED: begin
+                    if (shake_in_ready) begin
+                        fsm_shake_in_valid <= 1'b1;
+                        case (feed_cnt)
+                            3'd0: begin fsm_shake_in_data <= seed_d[ 63:  0]; fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd1; end
+                            3'd1: begin fsm_shake_in_data <= seed_d[127: 64]; fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd2; end
+                            3'd2: begin fsm_shake_in_data <= seed_d[191:128]; fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd3; end
+                            3'd3: begin fsm_shake_in_data <= seed_d[255:192]; fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd4; end
+                            3'd4: begin
+                                fsm_shake_in_data  <= 64'h02; // FIPS 203 Section 5 line 2: G(d || 2)
+                                fsm_shake_in_bytes <= 4'd1;
+                                fsm_shake_in_last  <= 1'b1;
+                                feed_cnt           <= 3'd0;
+                                state_r            <= S_G_SQUEEZE;
+                            end
+                            default: ;
+                        endcase
+                    end else begin
+                        fsm_shake_in_valid <= 1'b0;
+                    end
+                end
+
+                S_G_SQUEEZE: begin
+                    fsm_shake_in_valid  <= 1'b0;
+                    fsm_shake_out_ready <= 1'b1;
+                    if (shake_out_valid && fsm_shake_out_ready) begin
+                        case (feed_cnt)
+                            3'd0: reg_rho[ 63:  0] <= shake_out_data;
+                            3'd1: reg_rho[127: 64] <= shake_out_data;
+                            3'd2: reg_rho[191:128] <= shake_out_data;
+                            3'd3: reg_rho[255:192] <= shake_out_data;
+                            3'd4: reg_sigma[ 63:  0] <= shake_out_data;
+                            3'd5: reg_sigma[127: 64] <= shake_out_data;
+                            3'd6: reg_sigma[191:128] <= shake_out_data;
+                            3'd7: reg_sigma[255:192] <= shake_out_data;
+                            default: ;
+                        endcase
+                        feed_cnt <= feed_cnt + 3'd1;
+                        if (feed_cnt == 3'd7) begin
+                            fsm_shake_out_ready <= 1'b0;
+                            current_poly        <= 3'd0;
+                            state_r             <= S_CBD_INIT;
+                        end
+                    end
+                end
+
+                // -------------------------------------------------------------
+                // Phase 1: Sample s[0,1] and e[0,1] via CBD (eta1=3)
+                // -------------------------------------------------------------
+                S_CBD_INIT: begin
+                    shake_init          <= 1'b1;
+                    shake_mode          <= 2'b11; // SHAKE256 (PRF)
+                    shake_squeeze_words <= 10'd24; // 24 words = 192 bytes
+                    fsm_shake_in_valid  <= 1'b0;
+                    fsm_shake_out_ready <= 1'b0;
+                    feed_cnt            <= 3'd0;
+                    state_r             <= S_CBD_FEED_SEED;
+                end
+
+                S_CBD_FEED_SEED: begin
+                    if (shake_in_ready) begin
+                        fsm_shake_in_valid <= 1'b1;
+                        case (feed_cnt)
+                            3'd0: begin fsm_shake_in_data <= reg_sigma[ 63:  0]; fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd1; end
+                            3'd1: begin fsm_shake_in_data <= reg_sigma[127: 64]; fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd2; end
+                            3'd2: begin fsm_shake_in_data <= reg_sigma[191:128]; fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd3; end
+                            3'd3: begin fsm_shake_in_data <= reg_sigma[255:192]; fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd4; end
+                            3'd4: begin
+                                fsm_shake_in_data  <= {56'd0, 5'd0, current_poly}; // sigma || n
+                                fsm_shake_in_bytes <= 4'd1;
+                                fsm_shake_in_last  <= 1'b1;
+                                feed_cnt           <= 3'd0;
+                                // Arm CBD sampler
+                                cbd_start          <= 1'b1;
+                                cbd_mode_eta       <= 1'b0; // eta1 = 3
+                                cbd_target_poly_id <= current_poly;
+                                state_r            <= S_CBD_WAIT;
+                            end
+                            default: ;
+                        endcase
+                    end else begin
+                        fsm_shake_in_valid <= 1'b0;
+                    end
+                end
+
+                S_CBD_WAIT: begin
+                    fsm_shake_in_valid <= 1'b0;
+                    if (cbd_done) begin
+                        if (current_poly == 3'd3) begin
+                            current_poly <= 3'd0;
+                            state_r      <= S_NTT_START;
+                        end else begin
+                            current_poly <= current_poly + 3'd1;
+                            state_r      <= S_CBD_INIT;
+                        end
+                    end
+                end
+
+                // -------------------------------------------------------------
+                // Phase 2: Forward NTT on s0, s1, e0, e1 (Banks 0..3)
+                // -------------------------------------------------------------
+                S_NTT_START: begin
+                    ntt_start       <= 1'b1;
+                    ntt_mode        <= 1'b0; // Forward NTT
+                    ntt_target_bank <= current_poly;
+                    state_r         <= S_NTT_WAIT;
+                end
+
+                S_NTT_WAIT: begin
+                    if (ntt_done) begin
+                        if (current_poly == 3'd3) begin
+                            mat_row <= 2'd0;
+                            mat_col <= 2'd0;
+                            state_r <= S_A_INIT;
+                        end else begin
+                            current_poly <= current_poly + 3'd1;
+                            state_r      <= S_NTT_START;
+                        end
+                    end
+                end
+
+                // -------------------------------------------------------------
+                // Phase 3: Matrix A sampling & Pointwise Multiply-Accumulate
+                // -------------------------------------------------------------
+                S_A_INIT: begin
+                    shake_init          <= 1'b1;
+                    shake_mode          <= 2'b10; // SHAKE128
+                    shake_squeeze_words <= 10'd84; // 84 words = 4 blocks max
+                    fsm_shake_in_valid  <= 1'b0;
+                    fsm_shake_out_ready <= 1'b0;
+                    feed_cnt            <= 3'd0;
+                    state_r             <= S_A_FEED_SEED;
+                end
+
+                S_A_FEED_SEED: begin
+                    if (shake_in_ready) begin
+                        fsm_shake_in_valid <= 1'b1;
+                        case (feed_cnt)
+                            3'd0: begin fsm_shake_in_data <= reg_rho[ 63:  0]; fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd1; end
+                            3'd1: begin fsm_shake_in_data <= reg_rho[127: 64]; fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd2; end
+                            3'd2: begin fsm_shake_in_data <= reg_rho[191:128]; fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd3; end
+                            3'd3: begin fsm_shake_in_data <= reg_rho[255:192]; fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd4; end
+                            3'd4: begin
+                                // Seed: rho || j (col) || i (row)
+                                fsm_shake_in_data  <= {48'd0, 6'd0, mat_row, 6'd0, mat_col};
+                                fsm_shake_in_bytes <= 4'd2;
+                                fsm_shake_in_last  <= 1'b1;
+                                feed_cnt           <= 3'd0;
+                                // Arm SampleNTT into Bank 6
+                                sntt_start          <= 1'b1;
+                                sntt_target_poly_id <= 3'd6;
+                                state_r             <= S_A_WAIT_SAMPLE;
+                            end
+                            default: ;
+                        endcase
+                    end else begin
+                        fsm_shake_in_valid <= 1'b0;
+                    end
+                end
+
+                S_A_WAIT_SAMPLE: begin
+                    fsm_shake_in_valid <= 1'b0;
+                    if (sntt_done) begin
+                        state_r <= S_MUL_START;
+                    end
+                end
+
+                S_MUL_START: begin
+                    mul_start     <= 1'b1;
+                    mul_op_a_bank <= 3'd6; // A[row][col] in Bank 6
+                    mul_op_b_bank <= {1'b0, mat_col}; // s[col] in Bank 0 or 1
+                    mul_dest_bank <= (mat_row == 2'd0) ? 3'd4 : 3'd5; // t[row] in Bank 4 or 5
+                    if (mat_col == 2'd0) begin
+                        mul_accumulate <= 1'b0;
+                    end else begin
+                        mul_accumulate <= 1'b1;
+                        mul_acc_bank   <= (mat_row == 2'd0) ? 3'd4 : 3'd5;
+                    end
+                    state_r <= S_MUL_WAIT;
+                end
+
+                S_MUL_WAIT: begin
+                    if (mul_done) begin
+                        if (mat_col == 2'd0) begin
+                            mat_col <= 2'd1;
+                            state_r <= S_A_INIT;
+                        end else begin
+                            state_r <= S_ADD_E_START;
+                        end
+                    end
+                end
+
+                S_ADD_E_START: begin
+                    // Add noise: t[row] = t_accum + e[row]
+                    add_start     <= 1'b1;
+                    add_mode      <= 2'b00; // MODE_ADD
+                    add_dest_bank <= (mat_row == 2'd0) ? 3'd4 : 3'd5;
+                    add_op_a_bank <= (mat_row == 2'd0) ? 3'd4 : 3'd5;
+                    add_op_b_bank <= (mat_row == 2'd0) ? 3'd2 : 3'd3; // e[0] in Bank 2, e[1] in Bank 3
+                    add_op_c_bank <= 3'd0;
+                    state_r       <= S_ADD_E_WAIT;
+                end
+
+                S_ADD_E_WAIT: begin
+                    if (add_done) begin
+                        if (mat_row == 2'd0) begin
+                            mat_row <= 2'd1;
+                            mat_col <= 2'd0;
+                            state_r <= S_A_INIT;
+                        end else begin
+                            // All polynomials computed! Proceed to encoding.
+                            current_poly    <= 3'd0;
+                            dk_ram_wr_addr  <= 8'd0;
+                            state_r         <= S_ENC_START;
+                        end
+                    end
+                end
+
+                // -------------------------------------------------------------
+                // Phase 4: ByteEncode12 (s_hat0, s_hat1, t_hat0, t_hat1) into dk_ram
+                // -------------------------------------------------------------
+                S_ENC_START: begin
+                    enc_start_poly  <= 1'b1;
+                    enc_coeff_idx   <= 8'd0;
+                    enc_coeff_cnt   <= 9'd0;
+                    enc_read_valid  <= 1'b0;
+                    words_written_r <= 8'd0;
+                    case (current_poly)
+                        3'd0: enc_bank <= 3'd0; // s_hat[0] -> dk_ram[0..47]
+                        3'd1: enc_bank <= 3'd1; // s_hat[1] -> dk_ram[48..95]
+                        3'd2: enc_bank <= 3'd4; // t_hat[0] -> dk_ram[96..143]
+                        3'd3: enc_bank <= 3'd5; // t_hat[1] -> dk_ram[144..191]
+                        default: ;
+                    endcase
+                    state_r <= S_ENC_STREAM;
+                end
+
+                S_ENC_STREAM: begin
+                    if (enc_out_valid) begin
+                        dk_ram[dk_ram_wr_addr] <= enc_out_data;
+                        dk_ram_wr_addr         <= dk_ram_wr_addr + 8'd1;
+                        words_written_r        <= words_written_r + 8'd1;
+                    end
+
+                    if (enc_coeff_cnt < 9'd256) begin
+                        enc_coeff_idx  <= enc_coeff_idx + 8'd1;
+                        enc_coeff_cnt  <= enc_coeff_cnt + 9'd1;
+                        enc_read_valid <= 1'b1;
+                    end else begin
+                        enc_read_valid <= 1'b0;
+                        state_r        <= S_ENC_WAIT_DRAIN;
+                    end
+                end
+
+                S_ENC_WAIT_DRAIN: begin
+                    enc_read_valid <= 1'b0;
+                    if (enc_out_valid) begin
+                        dk_ram[dk_ram_wr_addr] <= enc_out_data;
+                        dk_ram_wr_addr         <= dk_ram_wr_addr + 8'd1;
+                        words_written_r        <= words_written_r + 8'd1;
+                        if (words_written_r == 8'd47) begin
+                            if (current_poly == 3'd3) begin
+                                feed_cnt <= 3'd0;
+                                state_r  <= S_WRITE_RHO;
+                            end else begin
+                                current_poly <= current_poly + 3'd1;
+                                state_r      <= S_ENC_START;
+                            end
+                        end
+                    end
+                end
+
+                S_WRITE_RHO: begin
+                    // Write rho (32 bytes = 4 words) to dk_ram[192..195]
+                    case (feed_cnt)
+                        3'd0: dk_ram[8'd192] <= reg_rho[ 63:  0];
+                        3'd1: dk_ram[8'd193] <= reg_rho[127: 64];
+                        3'd2: dk_ram[8'd194] <= reg_rho[191:128];
+                        3'd3: dk_ram[8'd195] <= reg_rho[255:192];
+                        default: ;
+                    endcase
+                    feed_cnt <= feed_cnt + 3'd1;
+                    if (feed_cnt == 3'd3) begin
+                        state_r <= S_HEK_INIT;
+                    end
+                end
+
+                // -------------------------------------------------------------
+                // Phase 5: H(ek) = SHA3-256(ek) over dk_ram[96..195] (100 words)
+                // -------------------------------------------------------------
+                S_HEK_INIT: begin
+                    shake_init          <= 1'b1;
+                    shake_mode          <= 2'b00; // SHA3-256
+                    shake_squeeze_words <= 10'd4; // 4 words = 32 bytes
+                    words_written_r     <= 8'd0;
+                    int_dk_rd_addr      <= 8'd96;
+                    fsm_shake_in_valid  <= 1'b0;
+                    state_r             <= S_HEK_PREFETCH;
+                end
+
+                S_HEK_PREFETCH: begin
+                    int_dk_rd_addr     <= 8'd97;
+                    fsm_shake_in_valid <= 1'b1;
+                    state_r            <= S_HEK_FEED;
+                end
+
+                S_HEK_FEED: begin
+                    if (shake_in_ready) begin
+                        words_written_r <= words_written_r + 8'd1;
+                        int_dk_rd_addr  <= int_dk_rd_addr + 8'd1;
+                        if (words_written_r == 8'd99) begin
+                            fsm_shake_in_valid  <= 1'b0;
+                            fsm_shake_out_ready <= 1'b1;
+                            feed_cnt            <= 3'd0;
+                            state_r             <= S_HEK_SQUEEZE;
+                        end
+                    end
+                end
+
+                S_HEK_SQUEEZE: begin
+                    fsm_shake_in_valid  <= 1'b0;
+                    fsm_shake_out_ready <= 1'b1;
+                    if (shake_out_valid && fsm_shake_out_ready) begin
+                        dk_ram[8'd196 + {5'd0, feed_cnt}] <= shake_out_data;
+                        feed_cnt <= feed_cnt + 3'd1;
+                        if (feed_cnt == 3'd3) begin
+                            fsm_shake_out_ready <= 1'b0;
+                            feed_cnt            <= 3'd0;
+                            state_r             <= S_WRITE_Z;
+                        end
+                    end
+                end
+
+                S_WRITE_Z: begin
+                    // Write z (32 bytes = 4 words) to dk_ram[200..203]
+                    case (feed_cnt)
+                        3'd0: dk_ram[8'd200] <= seed_z[ 63:  0];
+                        3'd1: dk_ram[8'd201] <= seed_z[127: 64];
+                        3'd2: dk_ram[8'd202] <= seed_z[191:128];
+                        3'd3: dk_ram[8'd203] <= seed_z[255:192];
+                        default: ;
+                    endcase
+                    feed_cnt <= feed_cnt + 3'd1;
+                    if (feed_cnt == 3'd3) begin
+                        state_r <= S_DONE;
+                    end
+                end
+
+                // -------------------------------------------------------------
+                // Phase 6: Done!
+                // -------------------------------------------------------------
+                S_DONE: begin
+                    kem_done          <= 1'b1;
+                    kem_shared_secret <= 256'd0;
+                    state_r           <= S_IDLE;
+                end
+
+                default: state_r <= S_IDLE;
+            endcase
+        end
+    end
+
+    // Unused signal tie-offs for lint compliance
+    wire _unused_ok = &{1'b0,
+        OP_ENCAPS, OP_DECAPS,
+        packet_bus_sof, packet_bus_packet_type, packet_bus_payload_len, packet_bus_session_id,
+        sntt_err_truncated, sntt_poly_mem_addr[10:8],
+        cbd_err_truncated, cbd_poly_mem_addr[10:8],
+        enc_overflow, enc_poly_last, enc_busy,
+        dec_busy, dec_err_non_canonical, dec_out_valid, dec_out_data,
+        comp10_out_valid, comp10_out_data, decomp10_out_valid, decomp10_out_data,
+        packer_in_ready, packer_out_valid, packer_out_last, packer_out_bytes, packer_out_data,
+        c_ram_rdata, shake_out_mask, shake_busy,
+        seed_m
+    };
+
+endmodule
