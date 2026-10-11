@@ -72,7 +72,10 @@ module byte_decode #(
     reg         next_busy;
 
     // Temporary variables for evaluation
-    reg [D-1:0] raw_coeff;
+    // raw_coeff is kept 12 bits wide for every D (zero-extended) so that the
+    // modulus compare/subtract below is width-clean under Verilator -Wall.
+    localparam [11:0] DMASK = (D == 12) ? 12'hFFF : ((12'd1 << D) - 12'd1);
+    reg [11:0]  raw_coeff;
     reg [11:0]  reduced_coeff;
 
     always @(*) begin
@@ -84,7 +87,7 @@ module byte_decode #(
         next_out_data          = 12'd0;
         next_err_non_canonical = err_non_canonical;
         next_busy              = busy;
-        raw_coeff              = {D{1'b0}};
+        raw_coeff              = 12'd0;
         reduced_coeff          = 12'd0;
 
         // 1. Ingest new 64-bit word if handshake fires
@@ -96,7 +99,7 @@ module byte_decode #(
 
         // 2. Extract coefficient if buffer has >= D bits and coeffs_out < 256
         if (busy && (next_buf_len >= D[7:0]) && (next_coeffs_out < 9'd256)) begin
-            raw_coeff = next_bit_buf[D-1:0];
+            raw_coeff = next_bit_buf[11:0] & DMASK;
             next_bit_buf = next_bit_buf >> D;
             next_buf_len = next_buf_len - D[7:0];
             next_coeffs_out = next_coeffs_out + 9'd1;
@@ -114,7 +117,7 @@ module byte_decode #(
                 end
                 next_out_data = reduced_coeff;
             end else begin
-                next_out_data = {{(12-D){1'b0}}, raw_coeff};
+                next_out_data = raw_coeff;
             end
         end
 
