@@ -29,19 +29,30 @@ from cocotb.triggers import FallingEdge, RisingEdge
 REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO))
 
-from model.mlkem.kem import keygen_internal
+from model.mlkem.kem import keygen_internal, encaps_internal
 
-KAT_PATH = REPO / "sim" / "vectors" / "fips203_kat" / "mlkem512_keygen.json"
+KAT_KEYGEN_PATH = REPO / "sim" / "vectors" / "fips203_kat" / "mlkem512_keygen.json"
+KAT_ENCAP_PATH  = REPO / "sim" / "vectors" / "fips203_kat" / "mlkem512_encap_decap.json"
 
 
-def load_kat(tc_id=1):
-    with open(KAT_PATH, "r", encoding="utf-8") as f:
+def load_kat_keygen(tc_id=1):
+    with open(KAT_KEYGEN_PATH, "r", encoding="utf-8") as f:
         data = json.load(f)
     for tg in data["testGroups"]:
         for tc in tg["tests"]:
             if tc["tcId"] == tc_id:
                 return tc
-    raise ValueError(f"tcId {tc_id} not found in KAT")
+    raise ValueError(f"tcId {tc_id} not found in KAT keygen")
+
+
+def load_kat_encaps(tc_id=1):
+    with open(KAT_ENCAP_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    for tg in data["testGroups"]:
+        for tc in tg["tests"]:
+            if tc["tcId"] == tc_id:
+                return tc
+    raise ValueError(f"tcId {tc_id} not found in KAT encap")
 
 
 async def reset_dut(dut):
@@ -53,6 +64,10 @@ async def reset_dut(dut):
     dut.seed_z.value = 0
     dut.seed_m.value = 0
     dut.dk_ram_rd_addr.value = 0
+    dut.dk_ram_wr_en.value = 0
+    dut.dk_ram_wr_addr_ext.value = 0
+    dut.dk_ram_wr_data_ext.value = 0
+    dut.c_ram_rd_addr_ext.value = 0
     dut.packet_bus_valid.value = 0
     dut.packet_bus_sof.value = 0
     dut.packet_bus_eof.value = 0
@@ -74,7 +89,35 @@ async def read_dk_ram(dut, num_words=204):
         await RisingEdge(dut.clk)
         await FallingEdge(dut.clk)
         words.append(int(dut.dk_ram_rdata.value))
-    # Convert 64-bit little-endian words to bytes
+    byte_arr = bytearray()
+    for w in words:
+        byte_arr.extend(w.to_bytes(8, byteorder="little"))
+    return bytes(byte_arr)
+
+
+async def write_dk_ram(dut, data_bytes, start_word_addr=96):
+    """Write bytes into dk_ram as 64-bit little-endian words."""
+    assert len(data_bytes) % 8 == 0, f"data_bytes len {len(data_bytes)} not multiple of 8"
+    num_words = len(data_bytes) // 8
+    dut.dk_ram_wr_en.value = 1
+    for i in range(num_words):
+        word = int.from_bytes(data_bytes[i * 8 : (i + 1) * 8], byteorder="little")
+        dut.dk_ram_wr_addr_ext.value = start_word_addr + i
+        dut.dk_ram_wr_data_ext.value = word
+        await RisingEdge(dut.clk)
+        await FallingEdge(dut.clk)
+    dut.dk_ram_wr_en.value = 0
+    await FallingEdge(dut.clk)
+
+
+async def read_c_ram(dut, num_words=96):
+    """Read 64-bit words from c_ram via synchronous read port."""
+    words = []
+    for addr in range(num_words):
+        dut.c_ram_rd_addr_ext.value = addr
+        await RisingEdge(dut.clk)
+        await FallingEdge(dut.clk)
+        words.append(int(dut.c_ram_rdata_ext.value))
     byte_arr = bytearray()
     for w in words:
         byte_arr.extend(w.to_bytes(8, byteorder="little"))
@@ -89,7 +132,7 @@ async def keygen_kat_vector_1(dut):
 
     await reset_dut(dut)
 
-    kat = load_kat(1)
+    kat = load_kat_keygen(1)
     d_bytes = bytes.fromhex(kat["d"])
     z_bytes = bytes.fromhex(kat["z"])
     expected_ek = bytes.fromhex(kat["ek"])
@@ -165,7 +208,7 @@ async def keygen_kat_vector_2(dut):
 
     await reset_dut(dut)
 
-    kat = load_kat(2)
+    kat = load_kat_keygen(2)
     d_bytes = bytes.fromhex(kat["d"])
     z_bytes = bytes.fromhex(kat["z"])
     expected_ek = bytes.fromhex(kat["ek"])
@@ -204,7 +247,7 @@ async def keygen_mid_stream_reset(dut):
 
     await reset_dut(dut)
 
-    kat = load_kat(1)
+    kat = load_kat_keygen(1)
     dut.seed_d.value = int.from_bytes(bytes.fromhex(kat["d"]), byteorder="little")
     dut.seed_z.value = int.from_bytes(bytes.fromhex(kat["z"]), byteorder="little")
     dut.cmd_op.value = 0
@@ -242,6 +285,125 @@ async def keygen_mid_stream_reset(dut):
             raise TimeoutError(f"KeyGen rerun did not complete within {cycles} cycles")
 
     assert int(dut.kem_done.value) == 1, "KeyGen must complete after reset recovery"
+
+
+# ==============================================================================
+# Milestone (b): Encapsulation
+# ==============================================================================
+import random
+
+OP_ENCAPS = 1
+
+
+async def run_encaps(dut, ek, m, session_id=7, timeout=60000):
+    """Load ek into dk_ram[96..195], run Encaps. Returns (cycles, outcome)
+    where outcome is 'done' or 'invalid'. Cycles are measured from the
+    cmd_start edge to the kem_done / kem_key_invalid strobe."""
+    await write_dk_ram(dut, ek, start_word_addr=96)
+    dut.seed_m.value = int.from_bytes(m, byteorder="little")
+    dut.cmd_op.value = OP_ENCAPS
+    dut.cmd_session_id.value = session_id
+    dut.cmd_start.value = 1
+    await FallingEdge(dut.clk)
+    dut.cmd_start.value = 0
+    cycles = 0
+    while True:
+        if int(dut.kem_done.value):
+            return cycles, "done"
+        if int(dut.kem_key_invalid.value):
+            return cycles, "invalid"
+        await FallingEdge(dut.clk)
+        cycles += 1
+        if cycles > timeout:
+            raise TimeoutError(f"Encaps did not finish in {cycles} cycles")
+
+
+async def check_encaps_against_model(dut, ek, m, label):
+    exp_k, exp_c = encaps_internal(ek, m)
+    cycles, outcome = await run_encaps(dut, ek, m)
+    assert outcome == "done", f"{label}: expected done, got {outcome}"
+    got_c = await read_c_ram(dut, 96)
+    got_k = int(dut.kem_shared_secret.value).to_bytes(32, byteorder="little")
+    assert got_c == exp_c, f"{label}: ciphertext mismatch"
+    assert got_k == exp_k, f"{label}: shared secret mismatch"
+    return cycles
+
+
+@cocotb.test()
+async def encaps_kat_vectors(dut):
+    """NIST mlkem512_encap_decap.json tgId 1 (ML-KEM-512 encapsulation) tcId 1..5."""
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    for tc_id in range(1, 6):
+        await reset_dut(dut)
+        kat = load_kat_encaps(tc_id)
+        ek = bytes.fromhex(kat["ek"])
+        m = bytes.fromhex(kat["m"])
+        exp_c = bytes.fromhex(kat["c"])
+        exp_k = bytes.fromhex(kat["k"])
+        assert len(exp_c) == 768 and len(exp_k) == 32
+        cycles, outcome = await run_encaps(dut, ek, m)
+        assert outcome == "done", f"tcId {tc_id}: got {outcome}"
+        got_c = await read_c_ram(dut, 96)
+        got_k = int(dut.kem_shared_secret.value).to_bytes(32, byteorder="little")
+        dut._log.info(f"Encaps KAT tcId {tc_id}: {cycles} cycles")
+        dut._log.info(
+            "sections ok: u0=%s u1=%s v=%s K=%s" % (
+                got_c[0:320] == exp_c[0:320], got_c[320:640] == exp_c[320:640],
+                got_c[640:768] == exp_c[640:768], got_k == exp_k))
+        assert got_c == exp_c, f"tcId {tc_id}: ciphertext != NIST KAT"
+        assert got_k == exp_k, f"tcId {tc_id}: shared secret != NIST KAT"
+
+
+@cocotb.test()
+async def encaps_random_pairs_vs_model(dut):
+    """>=20 random (ek, m) pairs: c (768 B) and K (32 B) bit-exact vs model."""
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    rng = random.Random(0xC14B)
+    for i in range(20):
+        await reset_dut(dut)
+        d = bytes(rng.getrandbits(8) for _ in range(32))
+        z = bytes(rng.getrandbits(8) for _ in range(32))
+        ek, _ = keygen_internal(d, z)
+        m = bytes(rng.getrandbits(8) for _ in range(32))
+        cycles = await check_encaps_against_model(dut, ek, m, f"random pair {i}")
+        dut._log.info(f"random pair {i}: bit-exact, {cycles} cycles")
+
+
+@cocotb.test()
+async def encaps_non_canonical_ek_rejected(dut):
+    """Coefficient >= 3329 in t_hat must raise kem_key_invalid + verdict 4'h8."""
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    kat = load_kat_encaps(1)
+    good_ek = bytes.fromhex(kat["ek"])
+    m = bytes.fromhex(kat["m"])
+    # Coefficient 0 of each t_hat poly: set its 12 bits to 3329 (first non-canonical).
+    for poly_off, label in ((0, "t_hat[0] coeff 0"), (384, "t_hat[1] coeff 0")):
+        await reset_dut(dut)
+        bad = bytearray(good_ek)
+        bad[poly_off] = 3329 & 0xFF
+        bad[poly_off + 1] = (bad[poly_off + 1] & 0xF0) | (3329 >> 8)
+        seen = {"valid": 0, "fail": 0, "reason": None, "done": 0}
+        await write_dk_ram(dut, bytes(bad), start_word_addr=96)
+        dut.seed_m.value = int.from_bytes(m, byteorder="little")
+        dut.cmd_op.value = OP_ENCAPS
+        dut.cmd_session_id.value = 9
+        dut.cmd_start.value = 1
+        await FallingEdge(dut.clk)
+        dut.cmd_start.value = 0
+        for _ in range(5000):
+            if int(dut.v_kem_valid.value):
+                seen["valid"] = 1
+                seen["fail"] = int(dut.v_kem_fail.value)
+                seen["reason"] = int(dut.v_kem_reason.value)
+                assert int(dut.kem_key_invalid.value) == 1
+            if int(dut.kem_done.value):
+                seen["done"] = 1
+            await FallingEdge(dut.clk)
+        assert seen["valid"] == 1, f"{label}: no verdict strobe"
+        assert seen["fail"] == 1, f"{label}: fail not set"
+        assert seen["reason"] == 0x8, f"{label}: reason {seen['reason']} != 4'h8"
+        assert seen["done"] == 0, f"{label}: kem_done must not fire"
+        assert int(dut.busy.value) == 0, f"{label}: must return to idle"
 
 
 # ==============================================================================
