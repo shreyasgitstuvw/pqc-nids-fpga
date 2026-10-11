@@ -47,5 +47,5 @@ _local/
 sim/cocotb/test_runner*
 sim/sim_build_*/
 scratch/
-"Claude outputs"/
+Claude outputs/
 scripts/preflight.local.py

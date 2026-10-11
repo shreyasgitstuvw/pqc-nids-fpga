@@ -61,7 +61,7 @@ class EngineModel:
         updates counters.
 
         The handshake KEM verdict is NOT part of the packet window. mlkem_top
-        reports 17,658 to 33,814 cycles after the header, long after the window
+        reports 17,658 to 33,814 clocks after the header, long after the window
         closes, so a KEM failure is reported on its own afterwards. Inside the
         window it was unreachable and an invalid handshake counted as passed.
         """
@@ -349,7 +349,7 @@ async def counters_saturate(dut):
 
 @cocotb.test()
 async def late_kem_verdict_is_reported(dut):
-    """mlkem_top reports 17,658-33,814 cycles after the header, so the KEM
+    """mlkem_top reports 17,658-33,814 clocks after the header, so the KEM
     verdict always lands after the packet window has closed. It used to be
     unreachable: RC_HANDSHAKE_KEY_INVALID could never be emitted and an invalid
     handshake was counted as passed."""

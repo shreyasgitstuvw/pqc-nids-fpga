@@ -7,7 +7,8 @@
 // ========================
 // 1. One-Time Key Generation (OTK):
 //    On key_valid / packet start, triggers chacha20.v with counter = 0.
-//    Takes 22 cycles. Output block bytes 0..31 provide the 32-byte OTK
+//    Takes one ChaCha20 block generation, 22 clocks. Output block bytes 0..31
+//    provide the 32-byte OTK
 //    (clamped r and secret s) loaded into poly1305.v.
 //
 // 2. Associated Data (AAD) Processing:
@@ -339,7 +340,7 @@ module chacha_poly (
                 end
 
                 // -------------------------------------------------------------
-                // S_GEN_OTK: Wait for ChaCha20 block 0 to produce OTK (22 cycles)
+                // S_GEN_OTK: Wait for ChaCha20 block 0 to produce OTK (22 clocks)
                 // -------------------------------------------------------------
                 S_GEN_OTK: begin
                     if (cc_done) begin

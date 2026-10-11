@@ -308,7 +308,8 @@ async def cms_no_stale_counts_at_the_epoch_boundary(dut):
             await FallingEdge(dut.clk)
         fail, reason, c_flow, c_host = await send_packet_header(dut, 0x0A000001, 80)
         seen.append(c_flow)
-        # the sweep takes 2048 cycles; wait it out so the next packet is counted
+        # the sweep is 2048 clocks long (asserted in cms_epoch_sweep_length);
+        # wait it out so the next packet is counted
         for _ in range(2100):
             await FallingEdge(dut.clk)
 
@@ -321,6 +322,35 @@ async def cms_no_stale_counts_at_the_epoch_boundary(dut):
         elif seen[i] == seen[i - 1] and seen[i] != 0:
             raise AssertionError(
                 f"count repeated at {seen[i]} (packet {i}), writeback discarded: {seen}")
+
+
+@cocotb.test()
+async def cms_epoch_sweep_length(dut):
+    """The epoch sweep clears 2048 addresses, one per clock, so `clearing` is
+    asserted for exactly 2048 cycles. That number appears in the module header
+    and in the trade-off argument for not double-buffering the counters, so it
+    is measured here rather than asserted from the source."""
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    await reset_dut(dut)
+
+    # Park the counter at EPOCH_N - 1 so this very next packet trips the
+    # boundary: the RTL compares epoch_pkt_count >= EPOCH_N - 1 on the update
+    # cycle, so EPOCH_N - 2 would only advance the counter.
+    dut.epoch_pkt_count.value = int(dut.EPOCH_N.value) - 1
+    await FallingEdge(dut.clk)
+    await send_packet_header(dut, 0x0A000001, 80)
+
+    for _ in range(200):
+        await FallingEdge(dut.clk)
+        if int(dut.clearing.value) == 1:
+            break
+    assert int(dut.clearing.value) == 1, "the sweep never started"
+
+    n = 0
+    while int(dut.clearing.value) == 1 and n < 5000:
+        await FallingEdge(dut.clk)
+        n += 1
+    assert n == 2048, f"clearing was asserted for {n} cycles, expected 2048"
 
 def test_runner():
     """pytest entry point using cocotb.runner and iverilog."""

@@ -46,9 +46,10 @@
 //   of those fields. The one-cycle lookup matches protocol_validator.v, which also
 //   answers one cycle after header_valid.
 //
-// Resource estimate (XC7Z020, pre-synthesis): 3 x 32-bit key registers plus
-//   3 valid bits and a 2-bit victim pointer, about 100 FFs and 3 32-bit
-//   comparators (~40 LUTs). No BRAM, no DSP.
+// Resource estimate (XC7Z020, pre-synthesis, not from a synthesis report):
+//   3 x 32-bit key registers plus 3 valid bits and a 2-bit victim pointer,
+//   about 100 FFs (estimated) and 3 32-bit comparators, ~40 LUTs (estimated).
+//   No BRAM, no DSP.
 //==========================================================================
 
 `timescale 1ns / 1ps

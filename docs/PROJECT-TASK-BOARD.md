@@ -1,84 +1,139 @@
 # PQC-NIDS Project Task Board
 
-**Repo:** `pqc-nids-fpga` — ML-KEM-512 inline crypto engine + threat detection, ZedBoard XC7Z020
-**Derived from:** each member's master guide in `docs/Member A|B|C|D/` and the phase table in
-`docs/PQC-NIDS-Architecture-and-Execution-Plan.md` §6.
-
-**How to use this file.** Tick your own boxes and commit. Blocking is written as
-`⛔ waiting on X1, X2` — if the tasks it names aren't ticked, you can't start. When you finish
-something that unblocks someone, say so in the commit message so they see it.
-
-**Status marks:** `[ ]` not started · `[~]` in progress · `[x]` done
+**Updated:** 11 Oct 2026 · branch `member-c/integration`
+**Owner:** Aakash (sole engineer from here to submission)
 
 ---
 
-## ⚠ Contract amendment v1.1.0 — 17 Sep 2026 — read before starting `B8` or `D4`
+## Where the project actually is
 
-`cam_matcher.v` was specified to read payload bytes off the packet bus. On an established session
-those bytes are ChaCha20 ciphertext, which is indistinguishable from random — a signature table can
-never match it, and the module would report zero detections forever while looking perfectly healthy.
-`cam_matcher.v` now reads the **decrypted plaintext stream** from `chacha_poly` instead
-(interface contract **§3.1**, new).
+**Every module is built, and they are now wired together and working.**
+`sim/cocotb/test_pqc_nids_top.py` drives serial bits into the real synthesis
+target and verifies the full chain: startup KeyGen on the real `mlkem_top`, an
+800-byte encapsulation key in over the link, Encaps, the 768-byte ciphertext
+transmitted back in a correctly framed packet, **both sides deriving the same
+shared secret**, then a clean encrypted packet forwarded, a signature in the
+decrypted plaintext caught, and a tampered tag caught.
 
-**Who is affected:**
-
-| Member | Impact |
+| | State |
 |---|---|
-| A | None beyond authoring the amendment. Contract is now v1.1.0. |
-| B | `B8` (`cam_matcher.v`) input source changes — **do not build it against the old spec**. `B7`, `B9` unaffected; both still read header fields only and stay parallel to the crypto lane. |
-| C | None. The KEM lane is untouched. |
-| D | `chacha20.v` must expose plaintext output ports (§3.1); `drop_engine.v` gains one telemetry exception (don't count a CAM hit on a tag-failed packet). New: **D now blocks `B8`** on the port names. |
+| Top-level synthesis target | `rtl/top/pqc_nids_top.v`, 37 RTL files |
+| Verilator `-Wall`, whole design as one unit | 0 warnings |
+| `pytest sim/cocotb` | 41 module/seam suites, all passing |
+| Preflight gate | passes (see `scripts/preflight.py`) |
+| Synthesis / timing / bitstream | **never run — this is the gate** |
+| Hardware bring-up | not started |
+| Demo | **needs decisions before it can be built — see below** |
 
-**Nothing else changed** — the strobe-based drop engine absorbed the late lane with no redesign,
-which is exactly what it was built for. Reason codes, packet bus, session table, ports: all unchanged.
-
----
-
-## Where the project actually is — 12 Sep 2026
-
-The phase plan puts us in **Phase II (Sep W1–2)**. Repo state:
-
-| | Plan says | Repo says |
-|---|---|---|
-| Phase I | done | **CLOSED** — contract FROZEN v1.0.0 (`A1`), CI (`P1`), `pipeline.py` (`P2`), demo skeleton (`P3`) |
-| Phase II | due now | in progress — `interface_contract.md` frozen, ingress RTL unblocked |
-| Phase III | Sep W3–4 | unblocked — Member B and D unblocked by contract freeze |
-| Phase IV–V | Oct–Nov | **Member C's Python oracle merged to main, KAT 80/80** |
-| Phase IX | Dec W3 | `demo/` skeleton landed early — config, display and checklist run today |
-
-`A1` — freezing the interface contract — is **DONE**. Phase I is formally closed (`P4`).
-The contract is frozen at v1.0.0 with Member C's FIPS 203 corrections and Member D's
-strobe-based latency-agnostic drop-engine synchronization.
-
-All downstream tasks previously blocked by `A1` (`B1`, `D1`, `A10`, `A12`) are now unblocked.
-Critical path is now active across all three lanes:
-- Member A: `A8` (UART 3 Mbaud), `A9` (CRC32), `A10` (deframer), `A12` (`pipeline.py` parser oracle)
-- Member B: `B1` sign-off, `B7` (`protocol_validator.v`), `B8` (`cam_matcher.v`), `B9` (`count_min_sketch.v`)
-- Member D: `D1` sign-off, `D4` (`chacha20.v`), `D7` (`drop_engine.v` stub)
+Everything from here is Phases VII–IX: synthesis, the board, and the demo. The
+honest summary of risk is that **no resource or timing figure in this repository
+has been produced by a synthesis tool yet**, so the first Vivado run is the step
+that can still surprise us.
 
 ---
 
-## Ready to start right now
+## Phase VII — synthesis and timing closure
 
-Every task that used to be listed here is done. All four lanes' modules are built, lint
-clean and passing their own tests. What is left is **integration**, and it is one
-person's work now (Member C) rather than four lanes in parallel.
+Ordered. `S1` gates everything after it, so do not reorder.
 
-| Task | What | Why it blocks |
+| # | Task | Why it blocks | Notes |
+|---|---|---|---|
+| `S1` | **Verify the XDC pin assignments against the ZedBoard master XDC** | A wrong `IOSTANDARD` is a DRC failure, and a wrong pin drives nothing. Costs a whole build cycle to discover | `constraints/pqc_nids.xdc` carries the standard values and says plainly they are unverified. Check `clk` (Y9), `btn_rst` (P16), the 8 LEDs, and above all which Pmod header the USB-UART is physically in — the file assumes JA |
+| `S2` | **Run `vivado -mode batch -source scripts/build_bitstream.tcl`** | The first real numbers in the project. Produces `build/reports/utilization.rpt`, `timing_summary.rpt` and `timing_worst_paths.rpt`, and exits non-zero if timing does not close | Expect it to take 20–40 minutes. The script already writes every report the final document needs |
+| `S3` | **Fix whatever timing actually fails** | 100 MHz is the design's stated clock; the demo's latency claims rest on it | The review names two likely paths, both in `poly1305.v`: the 131×64 multiply at `:299` and the four chained ~130-bit carry chains in `S_REDUCE`. Standard fixes are the five-limb 26-bit decomposition and splitting `S_REDUCE` across two states. **Do not pre-emptively pipeline** — let `timing_worst_paths.rpt` name the paths. `hash_functions.v`'s nine cascaded constant multiplies are the other candidate |
+| `S4` | **Check utilisation against the budget** | The synopsis budgets ≈8 DSP48E1 and ≈140 BRAM36 | `hash_functions.v` may map to ~34 DSPs if Vivado infers them; if so, pipeline it or force `use_dsp = no`. `poly1305` will take DSPs too. This is a real possibility, not a formality |
+| `S5` | **Re-run the full cocotb suite after any S3/S4 change** | Pipelining changes latency, and several tests assert exact cycle counts | `pytest sim/cocotb` — about 27 minutes |
+
+---
+
+## Phase VIII — the board
+
+| # | Task | Why it blocks | Notes |
+|---|---|---|---|
+| `H1` | **Flash the bitstream** | Nothing below can start | `vivado -mode batch -source demo/run/demo_load_bitstream.tcl`, which now has a real `build/pqc_nids.bit` to load |
+| `H2` | **Prove the serial link in isolation** | If the UART does not work, every later symptom is misleading | After reset the board transmits a telemetry frame every 250 ms whether or not anything is talking to it. `python test-network/recv.py --port COMx` should immediately show counters at zero and a `down` session. This is the cheapest possible first hardware test |
+| `H3` | **Prove the handshake on real silicon** | The one step simulation cannot fully stand in for | `python test-network/send.py --port COMx`. It prints `[KEM] handshake complete` and the derived secret. LD0 should go solid |
+| `H4` | **Run `demo/verify/smoke_test.py`** | It is the go/no-go gate, and it drives every attack class itself | Checks the handshake, that both sides derived the same secret, clean forwarding, and each of the eight reason codes. Also checks `cnt_lane_timeout` and `cnt_stray_verdict` are zero, which is how you find an integration problem the simulation missed |
+| `H5` | **Measure the real latencies for §6.3** | The report's timing table | Cycle counts are measured (`docs/Member C/Member-C-KEM-Cycle-Counts.md`); what is missing is the wall-clock confirmation at the achieved clock, plus the end-to-end handshake time, which `send.py` already prints |
+
+---
+
+## Phase IX — the demo
+
+**This needs a design conversation before any of it is built.** The scripts
+exist (`test-network/send.py`, `recv.py`, `attacker.py`, `demo/verify/smoke_test.py`)
+and the board's side is finished, but the demo as sketched in
+`demo/config/demo_config.py` assumes a topology the hardware does not have.
+
+### The blocking conflict
+
+`demo_config.py` names four serial ports — sender, receiver, attacker and a
+separate FPGA debug readout. **The board has one UART in and one UART out.**
+`rtl/top/pqc_nids_top.v` has a single `uart_rx_pin` and a single `uart_tx_pin`,
+and the transmitter is already shared between the ciphertext reply and the
+telemetry stream (`handshake_tx` has priority, `telemetry_tx` fills the gaps).
+
+Two consequences:
+
+1. **The sender and the attacker cannot both be wired to `uart_rx_pin`.** Two
+   drivers on one line is an electrical conflict, not a software problem.
+2. **Telemetry and the ciphertext reply arrive on the same host port.** `recv.py`
+   currently assumes a dedicated debug port. The frames are trivially
+   distinguishable — telemetry is 52 bytes starting `A5 5A` with a checksum,
+   the reply is 816 bytes starting with its own length — but one process has to
+   demultiplex them.
+
+### The decisions to make
+
+| # | Decision | Options | My recommendation |
+|---|---|---|---|
+| `D1` | **How does the attacker reach the board?** | (a) one host, one port, `send.py` and `attacker.py` time-multiplexed as separate processes; (b) a second Pmod USB-UART plus a second `uart_rx` and an arbiter in RTL; (c) an external TTL mux | **(a) for the first working demo**, because it needs no new RTL and no new hardware. If there is time after `H4` passes, (b) is a stronger story — a genuinely separate third device — and the RTL is maybe 80 lines. Decide this before building the demo script, because it changes the narration |
+| `D2` | **One host process or two?** | (a) one process that sends, demultiplexes the reply, and renders telemetry; (b) two processes sharing the port via a small broker | **(a)**. Merge `recv.py`'s renderer into `send.py`'s loop, or have `recv.py` take over the port and expose the handshake bytes. Sharing one serial port between two OS processes is a reliable way to lose bytes on the day |
+| `D3` | **What does the audience actually look at?** | LEDs, the host console, or both | Both. LD0–LD7 are live and mapped (`rtl/io/led_driver.v`, in lockstep with `demo/display/led_map.py`). The console gives the reason codes and counts |
+| `D4` | **Keep or drop the OLED?** | `demo/display/oled_layout.py` exists but there is **no OLED RTL and no OLED on the pin list** | **Drop it**, and delete the Python so the repo stops implying a feature that does not exist. The LEDs plus the console already cover the "nothing is silently lost" requirement |
+| `D5` | **Demo sequence and timing** | — | Needs writing: order of attacks, how long each dwells so the audience sees the LED, what the narration says at each step, and what to do if a step fails live |
+| `D6` | **What gets rehearsed, and how many times** | — | At minimum: a full clean run, and one deliberate failure you can recover from on camera |
+
+### Then build it
+
+| # | Task | Notes |
 |---|---|---|
-| `I1` | `session_lookup.v` — 5-tuple → session id | `parser.v` emits `session_id = 0`, `session_mgr` rejects 0, so no session can ever establish. Nothing downstream of the cipher works until this exists |
-| `I2` | `aead_framer.v` — key/nonce sequencer, AAD and tag extraction | `chacha_poly` needs `key`, `nonce`, `aad_*` and a parallel `expected_tag` that nothing produces |
-| `I3` | `rtl/top/pqc_nids_top.v` — the only synthesis target | there is no top level; `chacha_poly` is instantiated nowhere |
-| `I4` | `constraints/pqc_nids.xdc` + `scripts/build_bitstream.tcl` | no clock has ever been constrained; the demo's burn script references a build script that was never written |
-| `I5` | fix the cross-module defects found in the readiness review | see `docs/INTEGRATION-READINESS-REVIEW.md` |
-| `I6` | `rtl/io/` status display + `test-network/` + finish `smoke_test.py` | the demo's visible output and its traffic generator do not exist |
+| `X1` | Resolve `D1`–`D4`, and if `D1` picks (b), build the second ingress path | Blocks everything else here |
+| `X2` | Write the demo runner that implements `D5` | A single script that sequences the whole walkthrough, so the live run is one command rather than a person typing under pressure |
+| `X3` | Wire `demo/capture/session_log.py` into it | It already timestamps `[KEM]`/`[SEC]`/`[TX]`/`[RX]`/`[DROP]`/`[ALERT]`, and `send.py`/`recv.py`/`attacker.py` already print in that format. The log is the evidence behind the report's figures |
+| `X4` | Update `demo/verify/pre_demo_checklist.py` for the real topology | It still assumes the four-port layout |
+| `X5` | Rehearse `D6` | — |
 
-**`I1` is the one that matters most** — it is the single reason the data path cannot
-function today, and it is work the contract describes but never assigned to anyone.
+---
 
-Landed since this board was written: `P1` (CI), `P2`/`A12` (`model/pipeline.py`), `P3` (`demo/` skeleton),
-`C7` (merge), `A1`–`A13` (Member A complete: `crc32.v`, `deframer.v`, `parser.v`, `uart_rx.v`, `uart_tx.v`),
-`B1`–`B12` (Member B complete), `C8`–`C18` (Member C complete), `D1`–`D8` (Member D complete).
+## Phase IX — the report
+
+| # | Task | Notes |
+|---|---|---|
+| `R1` | Fill the §6.3 timing table from `S2`'s reports and `H5`'s measurements | Replace the `opcount.py` lower bounds, which are 3.7–4.0× optimistic. Measured cycle counts are in `docs/Member C/Member-C-KEM-Cycle-Counts.md` |
+| `R2` | Fill the resource table from `build/reports/utilization.rpt` | Every figure currently in an RTL header is an estimate and labelled as one |
+| `R3` | Write up the integration findings | `docs/INTEGRATION-READINESS-REVIEW.md` is the raw material: it records each defect's mechanism, how it was measured, and how it was closed. The honest version of this project's story is that per-module verification was excellent and cross-module verification did not exist until the seam tests were written |
+| `R4` | State the entropy source honestly | `rtl/control/entropy_src.v` is a DRBG stirred with UART arrival jitter, **not a TRNG**. Its header says what it is and is not good for, and it has a seed-load port for the Zynq PS's hardware RNG. Do not call it a TRNG |
+| `R5` | State the known limitations | `RC_SCAN` detects vertical port scans but misclassifies horizontal IP sweeps, because `dst_ip` never reaches the hash; the CMS does not count packets during its 2048-clock epoch sweep; the `dk` hash check (FIPS 203 §7.3) is model-only by design |
+
+---
+
+## The chain that gates everything
+
+```
+S1 (verify pins) -> S2 (synthesis) -> S3/S4 (fix timing and area) -> S5 (re-test)
+                                   -> H1 (flash) -> H2 (link) -> H3 (handshake)
+                                   -> H4 (smoke test)
+D1..D4 (demo decisions) -> X1 -> X2 -> X3 -> X5 (rehearse)
+S2, H5 -> R1, R2
+```
+
+`S2` is the single highest-value action left. Until it runs, the project's risk
+is unmeasured: everything else is either verified in simulation or waiting on a
+number only Vivado can produce.
+
+`D1`–`D4` can be decided in parallel with `S1`/`S2` — they need a conversation,
+not a toolchain.
 
 ---
 

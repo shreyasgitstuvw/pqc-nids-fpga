@@ -5,8 +5,8 @@ Cocotb testbench for rtl/ingress/uart_rx.v and uart_tx.v.
 Layers of test:
   1. Single byte loopback transmission (known patterns: 0x55, 0xAA, 0x00, 0xFF, 0xA5)
   2. 100 randomized byte sequential loopback
-  3. Modulo-3 fractional baud rate timing verification (100 cycles per 3 bits)
-  4. Glitch rejection on rx_pin (< 16 cycles pulse ignored)
+  3. Modulo-3 fractional baud rate timing verification (100 clocks per 3 bits)
+  4. Glitch rejection on rx_pin (pulses shorter than a half-bit ignored)
   5. Framing error assertion on low stop bit
   6. Synchronous reset recovery mid-transmission
 """
@@ -71,7 +71,17 @@ async def uart_loopback_random(dut):
 
 @cocotb.test()
 async def uart_timing_accuracy(dut):
-    """Verifies that 3 UART bit periods take exactly 100 clock cycles (33.33 cycles/bit)."""
+    """3 UART bit periods must take exactly 100 clock cycles.
+
+    100 MHz / 3 Mbaud is 33.33 clocks per bit, which no integer divider can hit.
+    uart_tx carries a fractional remainder, so the periods come out 33, 33, 34
+    and repeat -- exact on average, with no accumulating phase error. This
+    MEASURES the three periods and asserts the sum, because the previous version
+    of this test waited 100 cycles and asserted nothing, so it would have passed
+    with any divider at all.
+
+    0x55 is sent LSB first, so start/D0/D1 are 0/1/0: every bit is a distinct
+    level and each period's width is directly observable as a run length."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
 
@@ -84,10 +94,24 @@ async def uart_timing_accuracy(dut):
     while dut.tx_pin.value == 1:
         await RisingEdge(dut.clk)
 
-    # Count cycles across 3 bits (Start bit + D0 + D1 -> start of D2)
-    # Target: exactly 100 clock cycles for 3 bits at 100 MHz / 3 Mbaud
-    for _ in range(100):
+    widths, prev, run = [], int(dut.tx_pin.value), 0
+    for _ in range(600):
         await RisingEdge(dut.clk)
+        cur = int(dut.tx_pin.value)
+        if cur == prev:
+            run += 1
+        else:
+            widths.append(run + 1)
+            prev, run = cur, 0
+            if len(widths) == 3:
+                break
+
+    assert len(widths) == 3, f"only saw {len(widths)} bit periods"
+    assert widths == [33, 33, 34], (
+        f"bit periods were {widths}, expected [33, 33, 34] from the fractional "
+        f"divider")
+    assert sum(widths) == 100, (
+        f"3 bit periods took {sum(widths)} clocks, expected exactly 100")
 
     # Allow tx to complete
     while dut.tx_busy.value == 1:
@@ -96,7 +120,7 @@ async def uart_timing_accuracy(dut):
 
 @cocotb.test()
 async def uart_glitch_rejection(dut):
-    """Verifies that a short glitch on rx line (< 16 cycles) is rejected."""
+    """Verifies that a short glitch on rx line, shorter than a half-bit, is rejected."""
     if not hasattr(dut, "rx_override_en"):
         return
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
@@ -131,7 +155,7 @@ async def uart_framing_error(dut):
     dut.rx_override_pin.value = 1
     await RisingEdge(dut.clk)
 
-    # Start bit (0 for 33 cycles)
+    # Start bit (0 for one bit period)
     dut.rx_override_pin.value = 0
     for _ in range(33):
         await RisingEdge(dut.clk)
@@ -142,7 +166,7 @@ async def uart_framing_error(dut):
         for _ in range(33):
             await RisingEdge(dut.clk)
 
-    # Corrupted stop bit (0 for 34 cycles)
+    # Corrupted stop bit (0 for one bit period)
     dut.rx_override_pin.value = 0
     frame_err_observed = False
     for _ in range(34):

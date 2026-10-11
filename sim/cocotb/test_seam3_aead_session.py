@@ -10,7 +10,7 @@
 #   seam3_aead_roundtrip             a DATA packet decrypts to the right
 #                                    plaintext with a verifying tag
 #   seam3_tampered_ciphertext_fails  one flipped byte -> RC_BAD_TAG
-#   seam3_rate_independence          identical results at 1, 6 and 333 cycles
+#   seam3_rate_independence          identical results at 1, 6 and 333 clocks
 #                                    per byte -- the FIFO fix. Without it
 #                                    chacha_poly loses payload bytes, because
 #                                    the contract's packet bus cannot stall.
@@ -196,7 +196,7 @@ async def seam3_tampered_ciphertext_fails(dut):
 
 @cocotb.test()
 async def seam3_rate_independence(dut):
-    """The same packet must give the same result at 1, 6 and 333 cycles per
+    """The same packet must give the same result at 1, 6 and 333 clocks per
     byte. chacha_poly alone drops payload bytes when driven faster than it can
     accept them; aead_framer's FIFO is what makes this hold."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())

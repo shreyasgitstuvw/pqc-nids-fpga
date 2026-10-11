@@ -1,9 +1,74 @@
 # Integration Readiness Review — pqc-nids-fpga
 
 **Reviewer:** Member C, acting as team lead
-**Date:** 11 Oct 2026
-**Commit reviewed:** `40cd8ae` on `main`, plus `origin/member-a/parser-model` (unmerged)
-**Scope:** every tracked file in the repository, every branch, every inter-module interface
+**Review date:** 11 Oct 2026 · commit `40cd8ae`
+**Remediation date:** 11 Oct 2026 · branch `member-c/integration`
+
+---
+
+## Status after remediation
+
+Everything below was found by the review and then fixed on `member-c/integration`.
+This section is the summary; the original findings are kept verbatim underneath,
+each annotated with how it was closed, because the mechanism of a bug is the
+only reliable evidence that the fix addresses it.
+
+**The design now works end to end.** `sim/cocotb/test_pqc_nids_top.py` drives
+serial bits into `rtl/top/pqc_nids_top.v` — the real synthesis target, every
+lane, no models in the datapath — and verifies, in this order:
+
+1. a startup KeyGen completes on the real `mlkem_top` (17,640 cycles measured);
+2. an 800-byte encapsulation key arrives over the link and Encaps runs;
+3. the board transmits the 768-byte ciphertext back in a correctly framed
+   packet — length prefix, Ethernet/IPv4/UDP headers, valid IPv4 header
+   checksum, `PORT_HS_RESP`, CRC-32 trailer;
+4. **the secret the hardware derived equals the one Python derives from the
+   ciphertext the hardware sent** — the handshake genuinely working, not merely
+   completing;
+5. a ChaCha20-Poly1305 data packet encrypted under that secret is forwarded;
+6. a signature in the *decrypted plaintext* is caught as `RC_SIGNATURE`, which
+   only works because the plaintext inspection bus is wired through;
+7. a tampered tag is caught as `RC_BAD_TAG`.
+
+| Measure | Before | After |
+|---|---|---|
+| Top-level synthesis target | none; `rtl/top/` held a `.gitkeep` | `pqc_nids_top.v`, 37 RTL files, elaborates clean |
+| Verilator `-Wall` on the whole design | could not be run | **0 warnings** |
+| `pytest sim/cocotb` | 30 passed | **38 passed, 0 failed** (26m40s) |
+| Member A's ingress lane | unmerged, no PR, 11 lint warnings, 3 of 4 suites unable to start | merged, lint clean, 13/13 passing |
+| Modules never instantiated | `chacha_poly`, `parser`, `deframer`, `uart_rx`, `uart_tx` | none |
+| XDC / build script | neither existed | `constraints/pqc_nids.xdc`, `scripts/build_bitstream.tcl` |
+| `test-network/` | empty; `smoke_test.py` a stub returning 1 | `wire.py`, `send.py`, `recv.py`, `attacker.py`, real smoke test |
+
+**New modules written to close the gaps:** `session_lookup.v`,
+`aead_framer.v`, `entropy_src.v`, `led_driver.v`, `telemetry_tx.v`,
+`handshake_tx.v`, `pqc_nids_top.v`.
+
+**New seam tests, real modules only, following the C17 pattern:**
+`test_seam1_ingress_session.py` (6), `test_seam3_aead_session.py` (7),
+`test_pqc_nids_top.py` (1 end-to-end), plus `test_session_lookup.py` (6) and
+regressions added to `test_drop_engine.py` (4), `test_cam_matcher.py` (2) and
+`test_count_min_sketch.py` (2).
+
+**What is still genuinely open, and cannot be closed from here:**
+
+- **Synthesis has never run.** Every resource and timing figure in this
+  repository remains an estimate. `scripts/build_bitstream.tcl` writes the real
+  utilisation and timing reports and exits non-zero if timing does not close.
+  Until it runs, §3.6 below stays an estimate and the `poly1305` pipelining it
+  recommends should not be done blind — the timing report should decide which
+  paths actually need it.
+- **The XDC pin assignments need checking against the board.** They come from
+  the standard ZedBoard master constraints, but revisions differ and the Pmod
+  header choice is physical.
+- **`entropy_src.v` is a DRBG, not a TRNG.** It is an LFSR stirred with UART
+  arrival jitter. Its header says plainly what that is and is not good for, and
+  carries a seed-load port so the Zynq PS's hardware RNG can replace it with a
+  wiring change. Do not describe it as a TRNG in the report.
+- **Bypassed packets at a CMS epoch boundary are not counted** (liveness is
+  fixed; the counting gap is a documented trade-off, ~6 byte-times at 3 Mbaud).
+- **The `dk` hash check (FIPS 203 §7.3) is model-only**, by design: the board
+  generates its decapsulation key on-chip and never imports one.
 
 ---
 
@@ -33,6 +98,13 @@ are connected, then synthesise.
 ---
 
 ## 1. The hard blocker: the data path is dead by construction
+
+> **CLOSED.** `rtl/control/session_lookup.v` now owns the `session_id` field: a
+> 3-entry table keyed on `ip_src_addr` giving ids 1..3, handshakes claiming a
+> slot and DATA packets looking up. Proven by `test_seam1_ingress_session.py`,
+> which wires the real parser, lookup and session table together and includes a
+> regression that the old wiring stores nothing.
+
 
 This is one causal chain, and every link in it is verified in simulation.
 
@@ -66,7 +138,7 @@ bug in anyone's module.
 
 ---
 
-## 2. What does not exist
+## 2. What does not exist *(as of the review; see Status above for what was written)*
 
 Not "is incomplete" — does not exist as a file.
 
@@ -103,6 +175,16 @@ marked *estimated*.
 
 ### 3.1 Any data packet over 64 bytes hangs or silently corrupts the cipher
 
+> **CLOSED, and the figure below was overstated.** The hang was an artifact of
+> my own testbench missing the one-cycle `done` pulse during the inter-byte gap;
+> re-measured, the core is correct above about 51 cycles per byte and loses
+> bytes below that, so at the 3 Mbaud line rate (333 cycles per byte) it was
+> never a hang. The byte loss at speed was real. `aead_framer.v` fixes it with a
+> 512-byte ciphertext FIFO and a combinational `ct_valid`, and
+> `test_seam3_aead_session.py` proves identical results at 1, 6 and 333 cycles
+> per byte.
+
+
 `chacha_poly` stops accepting bytes for 22 cycles every 64 bytes while `chacha20`
 regenerates a keystream block, and signals this only on a `ready` output. Contract §3
 defines the packet bus as `valid`/`sof`/`eof`/`data` with **no ready field**, and §3.1
@@ -125,6 +207,12 @@ consumer, and `chacha20` already has 22 idle cycles per block to work in.
 
 ### 3.2 `RC_HANDSHAKE_KEY_INVALID` can never be reported
 
+> **CLOSED.** The handshake verdict is session-scoped, not packet-scoped, so
+> `drop_engine.v` now reports it out of band on its own `drop_valid` pulse, held
+> while a packet window is open so ordering stays deterministic. Regression:
+> `late_kem_verdict_is_reported`.
+
+
 `drop_engine.v:116-124` sets `expected_lanes = 5'b01011` for handshake packets — CRC,
 PROTO, CMS. The KEM lane is not in the mask. The commit at `:306` fires as soon as
 those three report, a few cycles after the header, and clears `in_packet` at `:336`.
@@ -146,6 +234,11 @@ deferred per-session verdict slot or removal from the packet-scoped engine entir
 
 ### 3.3 Every packet in a session reuses nonce 0
 
+> **CLOSED.** `aead_framer.v` pulses `nonce_adv` once per completed packet.
+> Regression: `seam3_nonce_advances` checks the counter actually moves across
+> three packets.
+
+
 `session_mgr` increments correctly (`:112-114`) and saturates properly, but nothing
 pulses `nonce_adv`. The only instantiation ties it to `1'b0`
 (`sim/seam2_kem_session_top.v:104` — my fixture). Measured: `lk_nonce` reads 0 on the
@@ -154,6 +247,15 @@ destroys confidentiality completely. The module is right; the port has no driver
 owner.
 
 ### 3.4 The Count-Min Sketch goes blind for 2048 contiguous cycles per epoch
+
+> **LIVENESS CLOSED; the counting gap is an accepted trade-off.** `clear_req`
+> defers the sweep until the pipeline drains, so no counted packet loses its
+> writeback, and bypassed packets now get an explicit pass verdict so
+> `drop_engine` can always commit. Measured: 4200 headers produced 33 verdicts
+> before, 4200 after. Double-buffering the counters would also close the
+> counting gap at 2x the BRAM; the module header records why that is not worth
+> it at 3 Mbaud and what would change the decision.
+
 
 Measured: `clearing` is high for exactly 2048 cycles. During it, `header_valid` is
 gated off at `count_min_sketch.v:90`, so no verdict strobe is produced; and
@@ -172,6 +274,16 @@ boundary, so the clear never stalls the lane.
 
 ### 3.5 A late verdict is charged to the wrong packet
 
+> **CLOSED.** Verdict latching is gated on the packet window, and strays are
+> counted in `cnt_stray_verdict` instead of being charged to the next packet. A
+> watchdog (`cnt_lane_timeout`) force-commits a packet whose lane never reports.
+> One subtlety found by the end-to-end test: the window must open at `hdr_valid`,
+> not at the first payload byte, because the header-only detectors answer one
+> and four cycles after the header, a whole byte-time before the payload starts.
+> Regressions: `stray_verdict_is_not_charged_to_next_packet`,
+> `watchdog_force_commits_a_missing_lane`.
+
+
 The verdict interface carries no packet identity: `in_packet` is one bit and the
 `fail_*` flags are global. Given 3.1's measured per-packet cost, the crypto verdict
 routinely arrives after the next packet's `sof`. Delegated review reproduced packet A's
@@ -185,6 +297,14 @@ explicitly sunk unused at `:165`. If any expected lane never strobes, that packe
 no verdict, ever.
 
 ### 3.6 Two combinational paths will not close at 100 MHz — *estimated*
+
+> **STILL OPEN, deliberately.** These are structural estimates and no synthesis
+> run exists to confirm them. Pipelining verified RFC 8439 arithmetic on an
+> estimate is the wrong order of work: `scripts/build_bitstream.tcl` now exists
+> and writes `timing_worst_paths.rpt`, so the timing report should name the paths
+> that actually need it. The XDC notes this explicitly rather than
+> pre-constraining the multiplies.
+
 
 No Vivado run exists, so these are structural estimates, not measurements.
 
@@ -207,6 +327,15 @@ LUT6. Neither figure appears in any budget in the repo. One pipeline register be
 `port_diffused` and the row multiplies fixes both the area and the timing risk.
 
 ### 3.7 Smaller, verified defects
+
+> **ALL CLOSED** except as noted. `cam_matcher`'s cross-packet match and lost
+> EOF strobe are fixed with regressions. `RC_SCAN` keying is unchanged and
+> remains a documented limitation. The `v_crc_*`/`v_deframe_*` mismatch is
+> resolved: a clean frame reports on `v_crc_*`, a failing frame on
+> `v_deframe_*` carrying its own code. `l4_length` is now the L4 header length
+> for both protocols (contract v1.1.1), which fixes the UDP rejection.
+> `chacha20.v`'s event list is unchanged; the rewrite is still free insurance.
+
 
 - **`cam_matcher` one-byte cross-packet false match.** The `pt_sof` window clear is
   registered (`:226-228`), so during the SOF cycle the comparators see the new packet's

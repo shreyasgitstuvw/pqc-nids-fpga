@@ -17,7 +17,7 @@
 //   - Compares calculated CRC with received 4-byte big-endian CRC.
 //   - On CRC mismatch: pulses verdict_valid with RC_CRC_FAIL (4'h1).
 //   - On length < 6: pulses verdict_valid with RC_MALFORMED (4'h3).
-//   - On mid-frame stall exceeding TIMEOUT_CYCLES (50,000 cycles = 500 us at 100 MHz):
+//   - On mid-frame stall exceeding TIMEOUT_CYCLES (50,000 clocks = 500 us at 100 MHz):
 //     resets FSM to IDLE, flushes state, does NOT assert eof, and pulses
 //     verdict_valid with RC_FRAME_TIMEOUT (4'h2).
 //

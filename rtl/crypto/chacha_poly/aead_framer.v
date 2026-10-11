@@ -40,7 +40,8 @@
 //   333 cycles and the FIFO never holds more than one byte.
 //
 //   The FIFO is read combinationally, so it infers distributed RAM (512 x 8 =
-//   4096 bits, about 64 LUTs) rather than a BRAM. That is deliberate: see
+//   4096 bits, about 64 LUTs, estimated) rather than a BRAM. That is
+//   deliberate: see
 //   "WHY ct_valid IS COMBINATIONAL" below.
 //
 // WHY THE LAST CIPHERTEXT BYTE IS HELD BACK
@@ -88,8 +89,12 @@
 //   verdict or that packet stalls forever. Those cases fail with RC_BAD_TAG:
 //   the packet could not be authenticated, which is what that code means.
 //
-// Resource estimate (XC7Z020, pre-synthesis): 1 x RAMB36E1 for the 2048-byte
-//   FIFO, ~350 FFs for the latched header/key/nonce/tag state, ~250 LUTs. No DSP.
+// Resource estimate (XC7Z020, pre-synthesis, not from a synthesis report):
+//   the 512-byte ciphertext FIFO is distributed RAM, about 64 LUTs (estimated);
+//   ~350 FFs (estimated) for the latched header/key/nonce/tag state; ~250 LUTs
+//   (estimated) of control. No BRAM, no DSP.
+//   (An earlier revision used a 2048-byte BRAM FIFO; the depth changed when the
+//    read became combinational. Figures updated with it.)
 //==========================================================================
 
 `timescale 1ns / 1ps
@@ -153,7 +158,14 @@ module aead_framer #(
 
     // ---- telemetry ----
     output reg          fifo_overflow,    // latched: a payload outran the buffer
-    output reg          no_session_drop   // 1-cycle: DATA with no established session
+    output reg          no_session_drop,  // 1-cycle: DATA with no established session
+
+    // 1-cycle: this DATA packet produced NO plaintext, so cam_matcher.v will
+    // never see a byte of it and will never strobe its verdict. drop_engine
+    // waits for the CAM lane on every DATA packet, so without this the packet
+    // would sit unadjudicated until the watchdog expired. The top level ORs this
+    // into the CAM lane as a pass: there is nothing to match against.
+    output reg          cam_bypass
 );
 
     localparam [1:0] PKT_DATA = 2'b01;
@@ -287,6 +299,7 @@ module aead_framer #(
             v_poly_fail   <= 1'b0;
             v_poly_reason <= `RC_NONE;
             no_session_drop <= 1'b0;
+            cam_bypass    <= 1'b0;
             stall_cnt     <= 16'd0;
         end else begin
             // 1-cycle strobes default low
@@ -297,6 +310,7 @@ module aead_framer #(
             v_poly_fail     <= 1'b0;
             v_poly_reason   <= `RC_NONE;
             no_session_drop <= 1'b0;
+            cam_bypass      <= 1'b0;
 
             // Progress watchdog: cleared whenever something advances.
             if (state == S_IDLE || do_xfer || lk_valid || cp_done || is_data_hdr)
@@ -390,6 +404,7 @@ module aead_framer #(
                     v_poly_valid  <= 1'b1;
                     v_poly_fail   <= 1'b1;
                     v_poly_reason <= `RC_BAD_TAG;
+                    cam_bypass    <= 1'b1;   // no plaintext for this packet
                     state         <= S_IDLE;
                 end
 
@@ -401,6 +416,7 @@ module aead_framer #(
                 v_poly_valid  <= 1'b1;
                 v_poly_fail   <= 1'b1;
                 v_poly_reason <= `RC_BAD_TAG;
+                cam_bypass    <= 1'b1;
                 state         <= S_IDLE;
             end
         end

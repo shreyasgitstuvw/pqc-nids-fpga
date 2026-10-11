@@ -34,12 +34,17 @@
 `include "reason_codes.vh"
 
 module drop_engine #(
-    // Cycles after pkt_eof to wait for the expected lanes before force-committing.
-    // Every in-window verdict is fast once the payload has ended (the slowest is
-    // the AEAD tag, which lands within ~1000 cycles of eof); the handshake KEM
-    // verdict is deliberately NOT in the window, see "HANDSHAKE VERDICT" below.
-    // 65536 cycles is 0.66 ms at 100 MHz.
-    parameter [31:0] WATCHDOG_CYCLES = 32'd65536
+    // Liveness bound on a packet's evaluation window. Armed at pkt_sof and
+    // restarted at pkt_eof, so for a packet with a payload it measures the stall
+    // AFTER the payload ended, and for a zero-payload packet it still bounds the
+    // window. It must exceed the bus time of the longest packet, because the
+    // payload streams inside the window: a 1518-byte frame at 3 Mbaud occupies
+    // about 505,000 clocks. The default, 2,000,000 clocks, is 20 ms at 100 MHz.
+    //
+    // The handshake KEM verdict is deliberately NOT one of the expected lanes,
+    // so this bound does not have to cover its ~34,000 clocks -- see
+    // "HANDSHAKE VERDICT" below.
+    parameter [31:0] WATCHDOG_CYCLES = 32'd2_000_000
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -133,7 +138,8 @@ module drop_engine #(
     reg        wd_armed;
 
     // The handshake verdict is asynchronous to the packet. mlkem_top reports
-    // 17,658 to 33,814 cycles after the header, long after the packet window has
+    // 17,658 to 33,814 clocks after the header (docs/Member C/Member-C-KEM-Cycle-
+    // Counts.md), long after the packet window has
     // closed, so RC_HANDSHAKE_KEY_INVALID could never be emitted and a
     // structurally invalid handshake was counted as passed. It is handled
     // out-of-band here, deferred by one cycle if a packet commit is in flight.
@@ -276,8 +282,6 @@ module drop_engine #(
                 rep_cam          <= 1'b0;
                 rep_cms          <= 1'b0;
                 rep_poly         <= 1'b0;
-                wd_cnt           <= 32'd0;
-                wd_armed         <= 1'b0;
                 deframe_code     <= `RC_FRAME_TIMEOUT;
 
                 fail_crc         <= 1'b0;
@@ -356,11 +360,17 @@ module drop_engine #(
             if (v_kem_valid && v_kem_fail)
                 kem_pending <= 1'b1;
 
-            // Watchdog: armed by pkt_eof, runs while the packet is still open.
-            if (pkt_eof && in_packet)
+            // Watchdog: armed as soon as the packet opens, and restarted at
+            // pkt_eof so the bound is measured from the end of the payload when
+            // there is one.
+            if (pkt_sof) begin
                 wd_armed <= 1'b1;
-            if (wd_armed && in_packet)
-                wd_cnt <= wd_cnt + 32'd1;
+                wd_cnt   <= 32'd0;
+            end else if (pkt_eof && in_packet) begin
+                wd_cnt   <= 32'd0;
+            end else if (wd_armed && in_packet) begin
+                wd_cnt   <= wd_cnt + 32'd1;
+            end
 
             // -----------------------------------------------------------------
             // Verdict Resolution & Commit
@@ -463,7 +473,7 @@ module drop_engine #(
                 // HANDSHAKE VERDICT (out of band)
                 // -------------------------------------------------------------
                 // mlkem_top reports a structural handshake failure 17,658 to
-                // 33,814 cycles after the header, by which time the packet
+                // 33,814 clocks after the header, by which time the packet
                 // window has long closed. Inside the window this verdict was
                 // unreachable: RC_HANDSHAKE_KEY_INVALID could never be emitted
                 // and an invalid handshake was counted as passed. It is a

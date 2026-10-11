@@ -13,8 +13,11 @@
 //   - Zero-cycle post-EOF latency: final CRC is available on the exact cycle
 //     that `eof` is asserted with the last byte.
 //   - Bit-exact agreement with model/pipeline.py compute_crc32() and zlib.crc32.
-//   - Resource footprint: ~45 LUTs, 32 FFs, 0 DSPs, 0 BRAMs.
-//   - Max frequency: >150 MHz on Zynq-7000 (100 MHz target easily met).
+//   - Resource footprint: ~45 LUTs (estimated), 32 FFs (estimated), 0 DSPs,
+//     0 BRAMs. Pre-synthesis; no synthesis report exists yet.
+//   - Timing: a single 8-bit XOR tree, so it is not expected to be anywhere
+//     near the critical path. No Fmax is claimed until
+//     scripts/build_bitstream.tcl has produced a timing report.
 //
 // Interface Conventions:
 //   - Synchronous, active-high reset (`rst`).
