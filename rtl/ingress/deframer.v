@@ -28,6 +28,8 @@
 // Owner: Member A (Ingress, Parser, and Interface Contract)
 //==============================================================================
 
+`timescale 1ns / 1ps
+
 `include "reason_codes.vh"
 
 module deframer #(
@@ -93,6 +95,11 @@ module deframer #(
         .crc_out   (crc_out),
         .crc_valid (crc_ready)
     );
+
+    // crc32 raises crc_valid one cycle after the final payload byte. The compare
+    // below happens in STATE_CRC3, three byte-times later, so crc_out is settled
+    // and the strobe is not needed. Sunk explicitly to keep lint clean.
+    wire _unused_crc_ready = crc_ready;
 
     // Combinational length and CRC comparison signals
     wire [15:0] total_len_comb = {len_hi, in_data};

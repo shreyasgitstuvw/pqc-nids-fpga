@@ -301,8 +301,14 @@ def parse_headers(raw: bytes) -> PacketBus:
         bus.packet_type = PKT_HANDSHAKE_EK
     elif bus.l4_dst_port == PORT_HS_RESP:
         bus.packet_type = PKT_HANDSHAKE_CT
-    else:
+    elif bus.l4_dst_port == PORT_DATA:
         bus.packet_type = PKT_DATA
+    else:
+        # Contract section 4: 2'b11 is Reserved and has no assigned port.
+        # Traffic on any other port is not ours; drop_engine rejects it as
+        # RC_MALFORMED. Previously this fell through to PKT_DATA, which fed
+        # arbitrary traffic into the cipher.
+        bus.packet_type = PKT_RESERVED
 
     return bus
 

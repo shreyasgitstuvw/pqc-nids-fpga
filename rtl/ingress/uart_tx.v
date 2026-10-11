@@ -20,6 +20,8 @@
 // Owner: Member A (Ingress, Parser, and Interface Contract)
 //==============================================================================
 
+`timescale 1ns / 1ps
+
 module uart_tx #(
     parameter CLK_FREQ  = 100000000, // 100 MHz system clock
     parameter BAUD_RATE = 3000000    // 3 Mbaud serial link
@@ -36,8 +38,12 @@ module uart_tx #(
 );
 
     // Compute integer and remainder counts for fractional divider
-    localparam CLKS_PER_BIT = CLK_FREQ / BAUD_RATE;          // 33 for 100M/3M
-    localparam REMAINDER    = CLK_FREQ % BAUD_RATE;          // 1,000,000 for 100M/3M
+    // Sized so every use below is width-exact (Verilator -Wall clean).
+    localparam        CPB_FULL     = CLK_FREQ / BAUD_RATE;
+    localparam [15:0] CLKS_PER_BIT = CPB_FULL[15:0];                // 33 for 100M/3M
+    localparam        REM_FULL     = CLK_FREQ % BAUD_RATE;
+    localparam [31:0] REMAINDER    = REM_FULL[31:0];                // 1,000,000 for 100M/3M
+    localparam [31:0] BAUD_W       = BAUD_RATE;                     // unsigned form for compares
 
     // FSM States
     localparam STATE_IDLE  = 2'd0;
@@ -62,8 +68,8 @@ module uart_tx #(
     function [15:0] get_bit_period;
         input [31:0] acc;
         begin
-            if (acc + REMAINDER >= BAUD_RATE)
-                get_bit_period = CLKS_PER_BIT + 1;
+            if (acc + REMAINDER >= BAUD_W)
+                get_bit_period = CLKS_PER_BIT + 16'd1;
             else
                 get_bit_period = CLKS_PER_BIT;
         end
@@ -99,8 +105,8 @@ module uart_tx #(
                         frac_acc      <= 32'd0;
 
                         target_cycles <= get_bit_period(32'd0);
-                        if (REMAINDER >= BAUD_RATE)
-                            frac_acc <= REMAINDER - BAUD_RATE;
+                        if (REMAINDER >= BAUD_W)
+                            frac_acc <= REMAINDER - BAUD_W;
                         else
                             frac_acc <= REMAINDER;
 
@@ -118,8 +124,8 @@ module uart_tx #(
                         tx_pin        <= tx_shift[0]; // Drive first data bit LSB
 
                         target_cycles <= get_bit_period(frac_acc);
-                        if (frac_acc + REMAINDER >= BAUD_RATE)
-                            frac_acc <= frac_acc + REMAINDER - BAUD_RATE;
+                        if (frac_acc + REMAINDER >= BAUD_W)
+                            frac_acc <= frac_acc + REMAINDER - BAUD_W;
                         else
                             frac_acc <= frac_acc + REMAINDER;
 
@@ -140,8 +146,8 @@ module uart_tx #(
                             // All data bits sent; drive Stop bit (high)
                             tx_pin        <= 1'b1;
                             target_cycles <= get_bit_period(frac_acc);
-                            if (frac_acc + REMAINDER >= BAUD_RATE)
-                                frac_acc <= frac_acc + REMAINDER - BAUD_RATE;
+                            if (frac_acc + REMAINDER >= BAUD_W)
+                                frac_acc <= frac_acc + REMAINDER - BAUD_W;
                             else
                                 frac_acc <= frac_acc + REMAINDER;
 
@@ -150,8 +156,8 @@ module uart_tx #(
                             bit_idx       <= bit_idx + 3'd1;
                             tx_pin        <= tx_shift[bit_idx + 3'd1];
                             target_cycles <= get_bit_period(frac_acc);
-                            if (frac_acc + REMAINDER >= BAUD_RATE)
-                                frac_acc <= frac_acc + REMAINDER - BAUD_RATE;
+                            if (frac_acc + REMAINDER >= BAUD_W)
+                                frac_acc <= frac_acc + REMAINDER - BAUD_W;
                             else
                                 frac_acc <= frac_acc + REMAINDER;
                         end
@@ -174,8 +180,8 @@ module uart_tx #(
                             tx_busy       <= 1'b1;
                             tx_pin        <= 1'b0; // Immediate start bit for next frame
                             target_cycles <= get_bit_period(32'd0);
-                            if (REMAINDER >= BAUD_RATE)
-                                frac_acc <= REMAINDER - BAUD_RATE;
+                            if (REMAINDER >= BAUD_W)
+                                frac_acc <= REMAINDER - BAUD_W;
                             else
                                 frac_acc <= REMAINDER;
 

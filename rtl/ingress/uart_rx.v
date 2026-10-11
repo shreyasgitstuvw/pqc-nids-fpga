@@ -25,6 +25,8 @@
 // Owner: Member A (Ingress, Parser, and Interface Contract)
 //==============================================================================
 
+`timescale 1ns / 1ps
+
 module uart_rx #(
     parameter CLK_FREQ  = 100000000, // 100 MHz system clock
     parameter BAUD_RATE = 3000000    // 3 Mbaud serial link
@@ -40,8 +42,13 @@ module uart_rx #(
 );
 
     // Compute integer and remainder counts for fractional divider
-    localparam CLKS_PER_BIT = CLK_FREQ / BAUD_RATE;          // 33 for 100M/3M
-    localparam REMAINDER    = CLK_FREQ % BAUD_RATE;          // 1,000,000 for 100M/3M
+    // Sized so every use below is width-exact (Verilator -Wall clean).
+    localparam        CPB_FULL     = CLK_FREQ / BAUD_RATE;
+    localparam [15:0] CLKS_PER_BIT = CPB_FULL[15:0];                // 33 for 100M/3M
+    localparam [15:0] HALF_BIT     = {1'b0, CPB_FULL[15:1]};         // 16 for 100M/3M
+    localparam        REM_FULL     = CLK_FREQ % BAUD_RATE;
+    localparam [31:0] REMAINDER    = REM_FULL[31:0];                // 1,000,000 for 100M/3M
+    localparam [31:0] BAUD_W       = BAUD_RATE;                     // unsigned form for compares
 
     // FSM States
     localparam STATE_IDLE  = 2'd0;
@@ -71,8 +78,8 @@ module uart_rx #(
     function [15:0] get_bit_period;
         input [31:0] acc;
         begin
-            if (acc + REMAINDER >= BAUD_RATE)
-                get_bit_period = CLKS_PER_BIT + 1;
+            if (acc + REMAINDER >= BAUD_W)
+                get_bit_period = CLKS_PER_BIT + 16'd1;
             else
                 get_bit_period = CLKS_PER_BIT;
         end
@@ -116,7 +123,7 @@ module uart_rx #(
                         rx_busy       <= 1'b1;
                         frac_acc      <= 32'd0;
                         // Half-bit sampling point for start bit center
-                        target_cycles <= (CLKS_PER_BIT / 2); // Cycle 16 at 100M/3M
+                        target_cycles <= HALF_BIT;           // Cycle 16 at 100M/3M
                         state         <= STATE_START;
                     end
                 end
@@ -129,8 +136,8 @@ module uart_rx #(
                         if (rx_sync_2 == 1'b0) begin
                             // Calculate full bit period for Data Bit 0
                             target_cycles <= get_bit_period(frac_acc);
-                            if (frac_acc + REMAINDER >= BAUD_RATE)
-                                frac_acc <= frac_acc + REMAINDER - BAUD_RATE;
+                            if (frac_acc + REMAINDER >= BAUD_W)
+                                frac_acc <= frac_acc + REMAINDER - BAUD_W;
                             else
                                 frac_acc <= frac_acc + REMAINDER;
 
@@ -154,8 +161,8 @@ module uart_rx #(
                         if (bit_idx == 3'd7) begin
                             // All 8 data bits sampled; compute Stop bit period
                             target_cycles <= get_bit_period(frac_acc);
-                            if (frac_acc + REMAINDER >= BAUD_RATE)
-                                frac_acc <= frac_acc + REMAINDER - BAUD_RATE;
+                            if (frac_acc + REMAINDER >= BAUD_W)
+                                frac_acc <= frac_acc + REMAINDER - BAUD_W;
                             else
                                 frac_acc <= frac_acc + REMAINDER;
 
@@ -163,8 +170,8 @@ module uart_rx #(
                         end else begin
                             bit_idx <= bit_idx + 3'd1;
                             target_cycles <= get_bit_period(frac_acc);
-                            if (frac_acc + REMAINDER >= BAUD_RATE)
-                                frac_acc <= frac_acc + REMAINDER - BAUD_RATE;
+                            if (frac_acc + REMAINDER >= BAUD_W)
+                                frac_acc <= frac_acc + REMAINDER - BAUD_W;
                             else
                                 frac_acc <= frac_acc + REMAINDER;
                         end

@@ -42,3 +42,10 @@ Thumbs.db
 
 # local experiments, not part of the project
 _local/
+
+# cocotb Python-runner leftovers
+sim/cocotb/test_runner*
+sim/sim_build_*/
+scratch/
+"Claude outputs"/
+scripts/preflight.local.py

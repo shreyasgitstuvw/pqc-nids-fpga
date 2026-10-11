@@ -22,6 +22,8 @@
 // Owner: Member A (Ingress, Parser, and Interface Contract)
 //==============================================================================
 
+`timescale 1ns / 1ps
+
 `include "reason_codes.vh"
 
 module parser (
@@ -74,6 +76,7 @@ module parser (
     localparam PKT_HANDSHAKE_EK = 2'b00;
     localparam PKT_DATA         = 2'b01;
     localparam PKT_HANDSHAKE_CT = 2'b10;
+    localparam PKT_RESERVED     = 2'b11;  // contract 4: no assigned port -> dropped RC_MALFORMED
 
     // FSM State Encoding
     localparam STATE_IDLE      = 4'd0;
@@ -288,7 +291,7 @@ module parser (
                                 byte_sub_idx <= 6'd0;
                                 if (ip_ihl_reg > 4'd5) begin
                                     // IPv4 Options present -> drain options
-                                    opt_remaining <= (ip_ihl_reg - 4'd5) * 4'd4 - 6'd1;
+                                    opt_remaining <= ({2'd0, ip_ihl_reg} - 6'd5) * 6'd4 - 6'd1;
                                     state         <= STATE_IP_OPT;
                                 end else if (ip_protocol == 8'd6) begin
                                     state <= STATE_TCP;
@@ -382,7 +385,7 @@ module parser (
                                     hdr_valid <= 1'b1;
                                     state     <= STATE_IDLE;
                                 end else begin
-                                    opt_remaining <= (tcp_offset_reg - 4'd5) * 4'd4 - 6'd1;
+                                    opt_remaining <= ({2'd0, tcp_offset_reg} - 6'd5) * 6'd4 - 6'd1;
                                     state         <= STATE_TCP_OPT;
                                 end
                             end else begin
@@ -394,8 +397,10 @@ module parser (
                                     packet_type <= PKT_HANDSHAKE_EK;
                                 else if (l4_dst_port == PORT_HS_RESP)
                                     packet_type <= PKT_HANDSHAKE_CT;
-                                else
+                                else if (l4_dst_port == PORT_DATA)
                                     packet_type <= PKT_DATA;
+                                else
+                                    packet_type <= PKT_RESERVED;
 
                                 // Payload length calculation
                                 if (ip_total_length >= (ip_ihl_bytes + 16'd20)) begin
@@ -439,8 +444,10 @@ module parser (
                                 packet_type <= PKT_HANDSHAKE_EK;
                             else if (l4_dst_port == PORT_HS_RESP)
                                 packet_type <= PKT_HANDSHAKE_CT;
-                            else
+                            else if (l4_dst_port == PORT_DATA)
                                 packet_type <= PKT_DATA;
+                            else
+                                packet_type <= PKT_RESERVED;
 
                             if (ip_total_length >= (ip_ihl_bytes + tcp_hdr_bytes)) begin
                                 payload_len <= ip_total_length - ip_ihl_bytes - tcp_hdr_bytes;
@@ -502,8 +509,10 @@ module parser (
                                 packet_type <= PKT_HANDSHAKE_EK;
                             else if (l4_dst_port == PORT_HS_RESP)
                                 packet_type <= PKT_HANDSHAKE_CT;
-                            else
+                            else if (l4_dst_port == PORT_DATA)
                                 packet_type <= PKT_DATA;
+                            else
+                                packet_type <= PKT_RESERVED;
 
                             if (ip_total_length < (ip_ihl_bytes + 16'd8) || l4_length < 16'd8) begin
                                 payload_len <= 16'd0;

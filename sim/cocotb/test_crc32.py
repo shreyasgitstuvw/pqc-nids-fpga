@@ -21,6 +21,19 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 from model.pipeline import compute_crc32  # the oracle
 
 
+async def reset_dut(dut):
+    """Apply a synchronous reset and park every input at a known level."""
+    dut.rst.value = 1
+    dut.init.value = 0
+    dut.in_valid.value = 0
+    dut.in_data.value = 0
+    dut.eof.value = 0
+    await RisingEdge(dut.clk)
+    await RisingEdge(dut.clk)
+    dut.rst.value = 0
+    await RisingEdge(dut.clk)
+
+
 async def drive_packet(dut, data: bytes) -> int:
     """Drives a packet byte-by-byte into crc32.v and returns the final calculated CRC."""
     n = len(data)
@@ -36,13 +49,20 @@ async def drive_packet(dut, data: bytes) -> int:
     dut.eof.value = 0
     dut.in_data.value = 0
 
+    # crc_out and crc_valid are registered on the eof cycle. cocotb's RisingEdge
+    # fires before that edge's non-blocking updates settle, so one more edge is
+    # needed before either is readable; at that point we are observing the
+    # strobe cycle itself, hence crc_valid == 1.
+    await RisingEdge(dut.clk)
+    assert int(dut.crc_valid.value) == 1, "crc_valid should strobe with the final CRC"
     return int(dut.crc_out.value)
 
 
 @cocotb.test()
-async def test_crc32_published_vector(dut):
+async def crc32_published_vector(dut):
     """Test against published standard vector: ASCII '123456789' -> 0xCBF43926."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())  # 100 MHz clock
+    await reset_dut(dut)
 
     dut.rst.value = 1
     dut.init.value = 0
@@ -64,9 +84,10 @@ async def test_crc32_published_vector(dut):
 
 
 @cocotb.test()
-async def test_crc32_random_packets(dut):
+async def crc32_random_packets(dut):
     """Test against 100 random packets of variable length (1 to 1500 bytes)."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    await reset_dut(dut)
 
     dut.rst.value = 1
     dut.init.value = 0
@@ -91,9 +112,10 @@ async def test_crc32_random_packets(dut):
 
 
 @cocotb.test()
-async def test_crc32_edge_cases(dut):
+async def crc32_edge_cases(dut):
     """Test edge cases: 1-byte, all 0x00, all 0xFF, back-to-back with zero gap."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    await reset_dut(dut)
 
     dut.rst.value = 1
     dut.init.value = 0
@@ -146,3 +168,27 @@ async def test_crc32_edge_cases(dut):
     got_fresh = await drive_packet(dut, p_fresh)
     assert got_fresh == compute_crc32(p_fresh), f"Post-reset mismatch: {got_fresh:08X} != {compute_crc32(p_fresh):08X}"
 
+
+# ==============================================================================
+# Runner for pytest / command-line execution
+# ==============================================================================
+import pytest
+
+
+@pytest.mark.parametrize("sim_build", ["sim_build_crc32"])
+def test_runner(sim_build):
+    from cocotb.runner import get_runner
+
+    proj_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    sources = [os.path.join(proj_path, "rtl", "ingress", "crc32.v")]
+    includes = [os.path.join(proj_path, "rtl", "control"),
+                os.path.join(proj_path, "rtl", "ingress")]
+    runner = get_runner("icarus")
+    runner.build(verilog_sources=sources, includes=includes, hdl_toplevel="crc32",
+                 build_dir=os.path.join(proj_path, "sim", sim_build), always=True)
+    runner.test(hdl_toplevel="crc32", test_module="test_crc32",
+                test_dir=os.path.join(proj_path, "sim", "cocotb"))
+
+
+if __name__ == "__main__":
+    test_runner("sim_build_crc32")

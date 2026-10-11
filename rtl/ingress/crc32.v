@@ -29,6 +29,8 @@
 // Reference: docs/Member A/interface_contract.md §2, model/pipeline.py
 //==============================================================================
 
+`timescale 1ns / 1ps
+
 module crc32 (
     input  wire        clk,        // 100 MHz system clock
     input  wire        rst,        // Synchronous active-high reset

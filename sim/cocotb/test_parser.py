@@ -124,7 +124,7 @@ async def send_packet(dut, raw_bytes: bytes) -> tuple:
 
 
 @cocotb.test()
-async def test_parser_standard_packets(dut):
+async def parser_standard_packets(dut):
     """Verifies that valid TCP, UDP, and Handshake packets match model/pipeline.py bit-for-bit."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -202,7 +202,7 @@ async def test_parser_standard_packets(dut):
 
 
 @cocotb.test()
-async def test_parser_malformed_packets(dut):
+async def parser_malformed_packets(dut):
     """Verifies that non-IPv4, corrupted, unsupported, and truncated packets are rejected."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -230,3 +230,28 @@ async def test_parser_malformed_packets(dut):
 
         rx_payload, hdr = await send_packet(dut, raw_pkt)
         assert hdr["parsed_ok"] == 0, f"RTL parser failed to reject {name}: {hdr}"
+
+
+# ==============================================================================
+# Runner for pytest / command-line execution
+# ==============================================================================
+import pytest
+
+
+@pytest.mark.parametrize("sim_build", ["sim_build_parser"])
+def test_runner(sim_build):
+    from cocotb.runner import get_runner
+
+    proj_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    sources = [os.path.join(proj_path, "rtl", "ingress", "parser.v")]
+    includes = [os.path.join(proj_path, "rtl", "control"),
+                os.path.join(proj_path, "rtl", "ingress")]
+    runner = get_runner("icarus")
+    runner.build(verilog_sources=sources, includes=includes, hdl_toplevel="parser",
+                 build_dir=os.path.join(proj_path, "sim", sim_build), always=True)
+    runner.test(hdl_toplevel="parser", test_module="test_parser",
+                test_dir=os.path.join(proj_path, "sim", "cocotb"))
+
+
+if __name__ == "__main__":
+    test_runner("sim_build_parser")

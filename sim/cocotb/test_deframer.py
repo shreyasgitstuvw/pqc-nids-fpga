@@ -88,7 +88,7 @@ async def send_frame(dut, frame_bytes: bytes) -> tuple:
 
 
 @cocotb.test()
-async def test_deframer_valid_frames(dut):
+async def deframer_valid_frames(dut):
     """Verifies that clean wire frames deframe bit-for-bit against model/pipeline.py."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())  # 100 MHz clock
     await reset_dut(dut)
@@ -115,7 +115,7 @@ async def test_deframer_valid_frames(dut):
 
 
 @cocotb.test()
-async def test_deframer_crc_failure(dut):
+async def deframer_crc_failure(dut):
     """Verifies that frames with corrupted CRC-32 trigger RC_CRC_FAIL (4'h1)."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -132,7 +132,7 @@ async def test_deframer_crc_failure(dut):
 
 
 @cocotb.test()
-async def test_deframer_malformed_length(dut):
+async def deframer_malformed_length(dut):
     """Verifies that frames with claimed total_length < 6 trigger RC_MALFORMED (4'h3)."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -147,7 +147,7 @@ async def test_deframer_malformed_length(dut):
 
 
 @cocotb.test()
-async def test_deframer_random_frames(dut):
+async def deframer_random_frames(dut):
     """Tests 50 random packet trials against model/pipeline.py."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -163,3 +163,29 @@ async def test_deframer_random_frames(dut):
         assert rx_payload == payload, f"Trial {trial} payload mismatch"
         assert sof_cnt == 1 and eof_cnt == 1, f"Trial {trial} framing strobe mismatch"
         assert verdict == (0, RC_NONE), f"Trial {trial} verdict mismatch: {verdict}"
+
+
+# ==============================================================================
+# Runner for pytest / command-line execution
+# ==============================================================================
+import pytest
+
+
+@pytest.mark.parametrize("sim_build", ["sim_build_deframer"])
+def test_runner(sim_build):
+    from cocotb.runner import get_runner
+
+    proj_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    sources = [os.path.join(proj_path, "rtl", "ingress", "crc32.v"),
+               os.path.join(proj_path, "rtl", "ingress", "deframer.v")]
+    includes = [os.path.join(proj_path, "rtl", "control"),
+                os.path.join(proj_path, "rtl", "ingress")]
+    runner = get_runner("icarus")
+    runner.build(verilog_sources=sources, includes=includes, hdl_toplevel="deframer",
+                 build_dir=os.path.join(proj_path, "sim", sim_build), always=True)
+    runner.test(hdl_toplevel="deframer", test_module="test_deframer",
+                test_dir=os.path.join(proj_path, "sim", "cocotb"))
+
+
+if __name__ == "__main__":
+    test_runner("sim_build_deframer")

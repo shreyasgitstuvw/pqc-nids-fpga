@@ -302,6 +302,16 @@ module chacha_poly (
             poly_key_valid <= 1'b0;
             poly_blk_valid <= 1'b0;
 
+            // The expected Poly1305 tag is the LAST 16 bytes of the packet
+            // payload, so on a streaming byte bus it is not yet known when
+            // key_valid is strobed. Capturing it once at key_valid latched
+            // zeros and failed every otherwise-valid packet. Track it
+            // continuously instead: it stays a registered input (good for
+            // timing) and is always current by the time poly1305 compares,
+            // which happens after the whole ciphertext and the length block
+            // have been fed. aead_framer.v drives it from the payload tail.
+            exp_tag_reg <= expected_tag;
+
             case (state)
                 // -------------------------------------------------------------
                 // S_IDLE: Await session key / nonce and packet initialization
@@ -314,7 +324,6 @@ module chacha_poly (
                         nonce_reg         <= nonce;
                         aad_reg           <= aad_data;
                         aad_len_reg       <= aad_len;
-                        exp_tag_reg       <= expected_tag;
                         ct_total_len      <= 64'd0;
                         ct_chunk_count    <= 4'd0;
                         ct_block_byte_idx <= 6'd0;

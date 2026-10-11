@@ -38,7 +38,7 @@ async def reset_dut(dut):
 
 
 @cocotb.test()
-async def test_uart_loopback_random(dut):
+async def uart_loopback_random(dut):
     """Tests multi-byte loopback with 100 randomized byte values."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())  # 100 MHz clock
     await reset_dut(dut)
@@ -70,7 +70,7 @@ async def test_uart_loopback_random(dut):
 
 
 @cocotb.test()
-async def test_uart_timing_accuracy(dut):
+async def uart_timing_accuracy(dut):
     """Verifies that 3 UART bit periods take exactly 100 clock cycles (33.33 cycles/bit)."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
@@ -95,7 +95,7 @@ async def test_uart_timing_accuracy(dut):
 
 
 @cocotb.test()
-async def test_uart_glitch_rejection(dut):
+async def uart_glitch_rejection(dut):
     """Verifies that a short glitch on rx line (< 16 cycles) is rejected."""
     if not hasattr(dut, "rx_override_en"):
         return
@@ -120,7 +120,7 @@ async def test_uart_glitch_rejection(dut):
 
 
 @cocotb.test()
-async def test_uart_framing_error(dut):
+async def uart_framing_error(dut):
     """Verifies that frame_err is asserted when the stop bit is low."""
     if not hasattr(dut, "rx_override_en"):
         return
@@ -156,3 +156,30 @@ async def test_uart_framing_error(dut):
             frame_err_observed = True
 
     assert frame_err_observed, "frame_err was not asserted on corrupted stop bit!"
+
+
+# ==============================================================================
+# Runner for pytest / command-line execution
+# ==============================================================================
+import pytest
+
+
+@pytest.mark.parametrize("sim_build", ["sim_build_uart_loopback"])
+def test_runner(sim_build):
+    from cocotb.runner import get_runner
+
+    proj_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    sources = [os.path.join(proj_path, "rtl", "ingress", "uart_rx.v"),
+               os.path.join(proj_path, "rtl", "ingress", "uart_tx.v"),
+               os.path.join(proj_path, "sim", "uart_loopback.v")]
+    includes = [os.path.join(proj_path, "rtl", "control"),
+                os.path.join(proj_path, "rtl", "ingress")]
+    runner = get_runner("icarus")
+    runner.build(verilog_sources=sources, includes=includes, hdl_toplevel="uart_loopback",
+                 build_dir=os.path.join(proj_path, "sim", sim_build), always=True)
+    runner.test(hdl_toplevel="uart_loopback", test_module="test_uart",
+                test_dir=os.path.join(proj_path, "sim", "cocotb"))
+
+
+if __name__ == "__main__":
+    test_runner("sim_build_uart_loopback")
