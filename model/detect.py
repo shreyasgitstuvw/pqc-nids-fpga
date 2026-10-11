@@ -55,27 +55,86 @@ Hardware Architecture & BRAM Sizing (ZedBoard XC7Z020 @ 100 MHz):
 import math
 import random
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # =====================================================================
-# Reason Codes (from rtl/control/reason_codes.vh)
+# START OF SECTION 1: REASON CODES, PROTOCOL CONSTANTS & HEADER MASKS
 # =====================================================================
 
-RC_NONE                 = 0x0  # No failure; packet passes
-RC_CRC_FAIL             = 0x1  # Member A: link corruption
-RC_FRAME_TIMEOUT        = 0x2  # Member A: truncated frame
-RC_MALFORMED            = 0x3  # Member B: protocol_validator invalid header
-RC_SIGNATURE            = 0x4  # Member B: cam_matcher known signature
-RC_FLOOD                = 0x5  # Member B: count_min_sketch rate anomaly
-RC_SCAN                 = 0x6  # Member B: count_min_sketch spread anomaly
-RC_BAD_TAG              = 0x7  # Member D: poly1305 auth failure
-RC_HANDSHAKE_KEY_INVALID= 0x8  # Member C: mlkem_top key structural failure
+# ---------------------------------------------------------------------
+# 1.1 Verdict Reason Codes (from rtl/control/reason_codes.vh)
+# 4-bit verdict codes output to drop_engine.v (RC_WIDTH = 4)
+# ---------------------------------------------------------------------
+RC_NONE                  = 0x0  # 4'h0: No failure; packet passes all lane checks
+RC_CRC_FAIL              = 0x1  # 4'h1: Member A (crc32.v) - link layer corruption
+RC_FRAME_TIMEOUT         = 0x2  # 4'h2: Member A (deframer.v) - truncated frame
+RC_MALFORMED             = 0x3  # 4'h3: Member B (protocol_validator.v) - illegal header
+RC_SIGNATURE             = 0x4  # 4'h4: Member B (cam_matcher.v) - known attack pattern
+RC_FLOOD                 = 0x5  # 4'h5: Member B (count_min_sketch.v) - volumetric flood
+RC_SCAN                  = 0x6  # 4'h6: Member B (count_min_sketch.v) - port scan dispersion
+RC_BAD_TAG               = 0x7  # 4'h7: Member D (poly1305.v) - authentication tag mismatch
+RC_HANDSHAKE_KEY_INVALID = 0x8  # 4'h8: Member C (mlkem_top.v) - structural key error
+
+# ---------------------------------------------------------------------
+# 1.2 Ethernet & Link Layer Constants
+# ---------------------------------------------------------------------
+ETHERTYPE_IPV4           = 0x0800  # 16'h0800: Standard IPv4 payload
+ETHERTYPE_ARP            = 0x0806  # 16'h0806: ARP (rejected by validator)
+ETHERTYPE_IPV6           = 0x86DD  # 16'h86DD: IPv6 (rejected by validator)
+
+# ---------------------------------------------------------------------
+# 1.3 IPv4 Header Constants
+# ---------------------------------------------------------------------
+IPV4_VERSION             = 4       # 4-bit version field (ip_version_ihl[7:4])
+IPV4_IHL_STANDARD        = 5       # 4-bit IHL (ip_version_ihl[3:0]): exactly 5 x 32-bit words (20 bytes)
+IPV4_MIN_HEADER_BYTES    = 20      # Minimum standard IPv4 header size
+IPV4_MIN_TOTAL_LEN       = 20      # Minimum valid ip_total_length
+
+IP_PROTO_TCP             = 6       # 8-bit protocol number for TCP
+IP_PROTO_UDP             = 17      # 8-bit protocol number for UDP
+IP_PROTO_ICMP            = 1       # 8-bit protocol number for ICMP (rejected)
+
+# ---------------------------------------------------------------------
+# 1.4 TCP Control Flags & Bit Masks (tcp_flags[7:0])
+# ---------------------------------------------------------------------
+TCP_FLAG_FIN             = 0x01    # Bit 0: Connection finish / close
+TCP_FLAG_SYN             = 0x02    # Bit 1: Synchronize / open connection
+TCP_FLAG_RST             = 0x04    # Bit 2: Reset / abort connection
+TCP_FLAG_PSH             = 0x08    # Bit 3: Push buffered data
+TCP_FLAG_ACK             = 0x10    # Bit 4: Acknowledgment valid
+TCP_FLAG_URG             = 0x20    # Bit 5: Urgent pointer valid
+TCP_FLAGS_CTRL_MASK      = 0x3F    # 6-bit mask covering all 6 standard control bits
+
+# ---------------------------------------------------------------------
+# 1.5 Layer 4 (Transport) Minimum Header Lengths
+# ---------------------------------------------------------------------
+UDP_MIN_HEADER_BYTES     = 8       # Minimum UDP header size (l4_length >= 8)
+TCP_MIN_HEADER_BYTES     = 20      # Minimum TCP header size (data offset >= 5 words = 20 bytes)
+
+# ---------------------------------------------------------------------
+# 1.6 System Port Allocations (from interface_contract.md §4)
+# ---------------------------------------------------------------------
+PORT_HS_INIT             = 51001   # Handshake Initiator (Encapsulation Key 'ek')
+PORT_HS_RESP             = 51002   # Handshake Responder (Ciphertext 'c')
+PORT_DATA                = 51010   # Established Session Data (ChaCha20-Poly1305)
+
+# ---------------------------------------------------------------------
+# 1.7 Packet Classification Types (packet_type[1:0])
+# ---------------------------------------------------------------------
+PKT_TYPE_HS_INIT         = 0b00    # 2'b00: Handshake ek packet (800 bytes)
+PKT_TYPE_DATA            = 0b01    # 2'b01: Established session data (variable)
+PKT_TYPE_HS_RESP         = 0b10    # 2'b10: Handshake ciphertext packet (768 bytes)
+PKT_TYPE_RESERVED        = 0b11    # 2'b11: Reserved (rejected as MALFORMED)
 
 
 # =====================================================================
-# Sizing & Sizing Parameters
+# START OF SECTION 2: COUNT-MIN SKETCH SIZING, MATH & HASH FUNCTIONS
 # =====================================================================
+
+# ---------------------------------------------------------------------
+# 2.1 Hardware Sizing & Calibration Parameters
+# ---------------------------------------------------------------------
 
 DEFAULT_FLOW_CMS_WIDTH = 2048     # w = 2^11 entries for flow/port sketch
 DEFAULT_HOST_CMS_WIDTH = 1024     # w = 2^10 entries for host aggregate sketch
@@ -183,7 +242,7 @@ def hash_k(
 
 
 # =====================================================================
-# Bit-Exact Count-Min Sketch Table Primitive
+# START OF SECTION 3: BIT-EXACT COUNT-MIN SKETCH TABLE PRIMITIVE
 # =====================================================================
 
 class CountMinSketch:
@@ -259,7 +318,7 @@ class CountMinSketch:
 
 
 # =====================================================================
-# Dual-Sketch Threat Detection Engine (Distinguishes Flood vs Scan)
+# START OF SECTION 4: DUAL-SKETCH THREAT DETECTION ENGINE (FLOOD VS SCAN)
 # =====================================================================
 
 class CMSThreatDetector:
@@ -346,13 +405,476 @@ class CMSThreatDetector:
 
 
 # =====================================================================
-# Self-Test and Validation Suite
+# START OF SECTION 4B: CAM SIGNATURE MATCHER (rtl/detect/cam_matcher.v)
+# =====================================================================
+
+CAM_SIGNATURES: List[Dict[str, Any]] = [
+    {"id": 1,  "name": "LOG4SHELL",      "pattern": b"${jndi:",        "len": 7},
+    {"id": 2,  "name": "SHELL_EXEC",     "pattern": b"/bin/sh",        "len": 7},
+    {"id": 3,  "name": "REVERSE_SHELL",  "pattern": b"/bin/bash",      "len": 9},
+    {"id": 4,  "name": "WEBSHELL_CMD",   "pattern": b"cmd.exe",        "len": 7},
+    {"id": 5,  "name": "POWERSHELL",     "pattern": b"powershell",    "len": 10},
+    {"id": 6,  "name": "NOP_SLED",       "pattern": b"\x90" * 8,       "len": 8},
+    {"id": 7,  "name": "SQL_INJECTION",  "pattern": b"UNION+SELECT",   "len": 12},
+    {"id": 8,  "name": "PHP_EVAL",       "pattern": b"eval(base64",   "len": 11},
+    {"id": 9,  "name": "PHP_SYSTEM",     "pattern": b"system($_GET",  "len": 12},
+    {"id": 10, "name": "ETC_PASSWD",     "pattern": b"/etc/passwd",   "len": 11},
+    {"id": 11, "name": "XSS_SCRIPT",     "pattern": b"<script>",      "len": 8},
+    {"id": 12, "name": "PATH_TRAVERSAL", "pattern": b"../../",        "len": 6},
+    {"id": 13, "name": "WGET_DROPPER",   "pattern": b"wget ",         "len": 5},
+    {"id": 14, "name": "CURL_DROPPER",   "pattern": b"curl ",         "len": 5},
+    {"id": 15, "name": "CHMOD_EXEC",     "pattern": b"chmod +x",      "len": 8},
+    {"id": 16, "name": "RECON_WHOAMI",   "pattern": b"whoami",        "len": 6},
+]
+
+
+class CAMMatcher:
+    """
+    Streaming Content-Addressable Memory (CAM) Signature Matcher for Lane 2.
+    Bit-exact software twin for rtl/detect/cam_matcher.v.
+
+    Scans the incoming decrypted plaintext stream (Interface Contract v1.1.0 §3.1)
+    against a bank of 16 threat signatures in 1 clock cycle using a 16-byte sliding window.
+    Emits 1-cycle strobe v_cam_valid with {v_cam_fail, v_cam_reason = RC_SIGNATURE}.
+    """
+
+    def __init__(self, signatures: Optional[List[Dict[str, Any]]] = None):
+        self.signatures = signatures if signatures is not None else CAM_SIGNATURES
+        self.window = bytearray()
+        self.match_latched = False
+        self.matched_sig_id = 0
+        self.matched_offset = 0
+        self.byte_count = 0
+
+    def reset_packet(self) -> None:
+        """Resets sliding window and match status on packet start (SOF)."""
+        self.window = bytearray()
+        self.match_latched = False
+        self.matched_sig_id = 0
+        self.matched_offset = 0
+        self.byte_count = 0
+
+    def feed_byte(self, byte_val: int, sof: bool = False, eof: bool = False) -> Tuple[bool, bool, int, int, int]:
+        """
+        Feeds one decrypted plaintext byte (matching pt_valid clock cycle).
+
+        Returns:
+            Tuple of:
+              (v_valid: bool, v_fail: bool, v_reason: int, match_sig_id: int, match_offset: int)
+        """
+        if sof:
+            self.reset_packet()
+
+        self.byte_count += 1
+        self.window.append(byte_val & 0xFF)
+        if len(self.window) > 16:
+            self.window.pop(0)
+
+        # Parallel 16-way pattern match across sliding window
+        for sig in self.signatures:
+            sig_pat = sig["pattern"]
+            sig_len = sig["len"]
+            if len(self.window) >= sig_len:
+                if bytes(self.window[-sig_len:]) == sig_pat:
+                    if not self.match_latched:
+                        self.match_latched = True
+                        self.matched_sig_id = sig["id"]
+                        self.matched_offset = self.byte_count - sig_len
+
+        # Egress verdict strobe resolves on eof (1 cycle registered)
+        v_valid = eof
+        v_fail = self.match_latched
+        v_reason = RC_SIGNATURE if self.match_latched else RC_NONE
+        return v_valid, v_fail, v_reason, self.matched_sig_id, self.matched_offset
+
+    def scan_payload(self, payload: bytes) -> Tuple[bool, int, int, int]:
+        """Convenience method to scan full payload bytes."""
+        self.reset_packet()
+        if len(payload) == 0:
+            return False, RC_NONE, 0, 0
+        v_fail = False
+        v_reason = RC_NONE
+        for i, b in enumerate(payload):
+            sof = (i == 0)
+            eof = (i == len(payload) - 1)
+            _, v_fail, v_reason, _, _ = self.feed_byte(b, sof, eof)
+        return v_fail, v_reason, self.matched_sig_id, self.matched_offset
+
+
+# =====================================================================
+# START OF SECTION 5: PROTOCOL VALIDATOR LOGIC (rtl/detect/protocol_validator.v)
+# =====================================================================
+
+def validate_protocol(
+    eth_type: int,
+    ip_version_ihl: int,
+    ip_protocol: int,
+    ip_total_length: int,
+    l4_src_port: int,
+    l4_dst_port: int,
+    l4_length: int,
+    tcp_flags: int,
+    payload_len: int,
+) -> Tuple[bool, int]:
+    """
+    Bit-exact reference model for rtl/detect/protocol_validator.v.
+
+    Pure combinational 1-cycle validation of packet header fields arriving
+    from the deframer/parser on the packet bus.
+
+    Verification Rules:
+      Rule 1: eth_type == 0x0800 (IPv4 only; ARP, IPv6, VLAN rejected)
+      Rule 2: IPv4 version == 4 and IHL == 5 (ip_version_ihl == 0x45; options rejected)
+      Rule 3: ip_protocol in (6 [TCP], 17 [UDP]) (ICMP, IGMP, etc. rejected)
+      Rule 4: l4_src_port != 0 and l4_dst_port != 0 (Port 0 is reserved/illegal)
+      Rule 5: TCP Flag Combinations (if TCP):
+              - SYN + FIN: Illegal simultaneous open/close
+              - SYN + RST: Illegal simultaneous open/reset
+              - NULL Scan: (tcp_flags & 0x3F) == 0 (no flags set)
+              - FIN without ACK: RFC 793 violation (FIN scan)
+      Rule 6: Length Consistency:
+              - ip_total_length >= 20
+              - If UDP: l4_length >= 8
+              - If TCP: l4_length >= 20
+              - ip_total_length == (ihl * 4) + l4_length + payload_len
+                where ihl = ip_version_ihl & 0x0F (i.e. 20 + l4_length + payload_len)
+
+    Returns:
+        (fail: bool, reason_code: int)
+        - (True, RC_MALFORMED) if any rule is violated
+        - (False, RC_NONE) if all rules pass
+    """
+    # Rule 1: EtherType must be IPv4 (0x0800)
+    if (eth_type & 0xFFFF) != ETHERTYPE_IPV4:
+        return True, RC_MALFORMED
+
+    # Rule 2: IPv4 version must be 4, IHL must be 5 (0x45)
+    version = (ip_version_ihl >> 4) & 0x0F
+    ihl = ip_version_ihl & 0x0F
+    if version != IPV4_VERSION or ihl != IPV4_IHL_STANDARD:
+        return True, RC_MALFORMED
+
+    # Rule 3: IP protocol must be TCP (6) or UDP (17)
+    proto = ip_protocol & 0xFF
+    if proto != IP_PROTO_TCP and proto != IP_PROTO_UDP:
+        return True, RC_MALFORMED
+
+    # Rule 4: Transport layer ports cannot be 0
+    src_port = l4_src_port & 0xFFFF
+    dst_port = l4_dst_port & 0xFFFF
+    if src_port == 0 or dst_port == 0:
+        return True, RC_MALFORMED
+
+    # Rule 5: TCP Flag Sanitization (TCP only)
+    if proto == IP_PROTO_TCP:
+        flags = tcp_flags & TCP_FLAGS_CTRL_MASK
+        has_fin = bool(flags & TCP_FLAG_FIN)
+        has_syn = bool(flags & TCP_FLAG_SYN)
+        has_rst = bool(flags & TCP_FLAG_RST)
+        has_ack = bool(flags & TCP_FLAG_ACK)
+
+        # 5a: SYN + FIN
+        if has_syn and has_fin:
+            return True, RC_MALFORMED
+        # 5b: SYN + RST
+        if has_syn and has_rst:
+            return True, RC_MALFORMED
+        # 5c: NULL scan (no control flags set)
+        if flags == 0:
+            return True, RC_MALFORMED
+        # 5d: FIN scan (FIN without ACK)
+        if has_fin and not has_ack:
+            return True, RC_MALFORMED
+
+    # Rule 6: Length Consistency Checks
+    total_len = ip_total_length & 0xFFFF
+    l4_len = l4_length & 0xFFFF
+    p_len = payload_len & 0xFFFF
+
+    if total_len < IPV4_MIN_TOTAL_LEN:
+        return True, RC_MALFORMED
+
+    if proto == IP_PROTO_UDP:
+        if l4_len < UDP_MIN_HEADER_BYTES:
+            return True, RC_MALFORMED
+    elif proto == IP_PROTO_TCP:
+        if l4_len < TCP_MIN_HEADER_BYTES:
+            return True, RC_MALFORMED
+
+    expected_total = (ihl * 4) + l4_len + p_len
+    if total_len != expected_total:
+        return True, RC_MALFORMED
+
+    return False, RC_NONE
+
+
+# =====================================================================
+# START OF SECTION 6: PROTOCOL VALIDATOR TEST VECTORS (17 CASES)
+# =====================================================================
+
+PROTOCOL_VALIDATOR_TEST_VECTORS = [
+    # --- Valid packets (must pass cleanly) ---
+    {
+        "name": "Valid TCP SYN Handshake (Port 51001)",
+        "eth_type": ETHERTYPE_IPV4,
+        "ip_version_ihl": 0x45,
+        "ip_protocol": IP_PROTO_TCP,
+        "ip_total_length": 40,
+        "l4_src_port": 49152,
+        "l4_dst_port": PORT_HS_INIT,
+        "l4_length": 20,
+        "tcp_flags": TCP_FLAG_SYN,
+        "payload_len": 0,
+        "exp_fail": False,
+        "exp_reason": RC_NONE,
+    },
+    {
+        "name": "Valid UDP DNS Query (Port 53)",
+        "eth_type": ETHERTYPE_IPV4,
+        "ip_version_ihl": 0x45,
+        "ip_protocol": IP_PROTO_UDP,
+        "ip_total_length": 60,
+        "l4_src_port": 5353,
+        "l4_dst_port": 53,
+        "l4_length": 8,
+        "tcp_flags": 0x00,
+        "payload_len": 32,
+        "exp_fail": False,
+        "exp_reason": RC_NONE,
+    },
+
+    # --- Rule 1: EtherType violations ---
+    {
+        "name": "Invalid EtherType (ARP 0x0806)",
+        "eth_type": ETHERTYPE_ARP,
+        "ip_version_ihl": 0x45,
+        "ip_protocol": IP_PROTO_TCP,
+        "ip_total_length": 40,
+        "l4_src_port": 12345,
+        "l4_dst_port": 80,
+        "l4_length": 20,
+        "tcp_flags": TCP_FLAG_SYN,
+        "payload_len": 0,
+        "exp_fail": True,
+        "exp_reason": RC_MALFORMED,
+    },
+    {
+        "name": "Invalid EtherType (IPv6 0x86DD)",
+        "eth_type": ETHERTYPE_IPV6,
+        "ip_version_ihl": 0x45,
+        "ip_protocol": IP_PROTO_TCP,
+        "ip_total_length": 40,
+        "l4_src_port": 12345,
+        "l4_dst_port": 80,
+        "l4_length": 20,
+        "tcp_flags": TCP_FLAG_SYN,
+        "payload_len": 0,
+        "exp_fail": True,
+        "exp_reason": RC_MALFORMED,
+    },
+
+    # --- Rule 2: IP version & IHL violations ---
+    {
+        "name": "Invalid IP Version (IPv6 Header 0x65)",
+        "eth_type": ETHERTYPE_IPV4,
+        "ip_version_ihl": 0x65,
+        "ip_protocol": IP_PROTO_TCP,
+        "ip_total_length": 40,
+        "l4_src_port": 12345,
+        "l4_dst_port": 80,
+        "l4_length": 20,
+        "tcp_flags": TCP_FLAG_SYN,
+        "payload_len": 0,
+        "exp_fail": True,
+        "exp_reason": RC_MALFORMED,
+    },
+    {
+        "name": "Invalid IP IHL (Options Present 0x46)",
+        "eth_type": ETHERTYPE_IPV4,
+        "ip_version_ihl": 0x46,
+        "ip_protocol": IP_PROTO_TCP,
+        "ip_total_length": 44,
+        "l4_src_port": 12345,
+        "l4_dst_port": 80,
+        "l4_length": 20,
+        "tcp_flags": TCP_FLAG_SYN,
+        "payload_len": 0,
+        "exp_fail": True,
+        "exp_reason": RC_MALFORMED,
+    },
+
+    # --- Rule 3: Protocol violations ---
+    {
+        "name": "Invalid IP Protocol (ICMP Proto 1)",
+        "eth_type": ETHERTYPE_IPV4,
+        "ip_version_ihl": 0x45,
+        "ip_protocol": IP_PROTO_ICMP,
+        "ip_total_length": 28,
+        "l4_src_port": 12345,
+        "l4_dst_port": 80,
+        "l4_length": 8,
+        "tcp_flags": 0x00,
+        "payload_len": 0,
+        "exp_fail": True,
+        "exp_reason": RC_MALFORMED,
+    },
+    {
+        "name": "Invalid IP Protocol (IGMP Proto 2)",
+        "eth_type": ETHERTYPE_IPV4,
+        "ip_version_ihl": 0x45,
+        "ip_protocol": 2,
+        "ip_total_length": 28,
+        "l4_src_port": 12345,
+        "l4_dst_port": 80,
+        "l4_length": 8,
+        "tcp_flags": 0x00,
+        "payload_len": 0,
+        "exp_fail": True,
+        "exp_reason": RC_MALFORMED,
+    },
+
+    # --- Rule 4: Reserved Port 0 violations ---
+    {
+        "name": "Illegal L4 Source Port (Port 0)",
+        "eth_type": ETHERTYPE_IPV4,
+        "ip_version_ihl": 0x45,
+        "ip_protocol": IP_PROTO_TCP,
+        "ip_total_length": 40,
+        "l4_src_port": 0,
+        "l4_dst_port": 80,
+        "l4_length": 20,
+        "tcp_flags": TCP_FLAG_SYN,
+        "payload_len": 0,
+        "exp_fail": True,
+        "exp_reason": RC_MALFORMED,
+    },
+    {
+        "name": "Illegal L4 Destination Port (Port 0)",
+        "eth_type": ETHERTYPE_IPV4,
+        "ip_version_ihl": 0x45,
+        "ip_protocol": IP_PROTO_TCP,
+        "ip_total_length": 40,
+        "l4_src_port": 54321,
+        "l4_dst_port": 0,
+        "l4_length": 20,
+        "tcp_flags": TCP_FLAG_SYN,
+        "payload_len": 0,
+        "exp_fail": True,
+        "exp_reason": RC_MALFORMED,
+    },
+
+    # --- Rule 5: Illegal TCP flag combinations ---
+    {
+        "name": "Illegal TCP Flag Combo (SYN + FIN)",
+        "eth_type": ETHERTYPE_IPV4,
+        "ip_version_ihl": 0x45,
+        "ip_protocol": IP_PROTO_TCP,
+        "ip_total_length": 40,
+        "l4_src_port": 54321,
+        "l4_dst_port": 80,
+        "l4_length": 20,
+        "tcp_flags": TCP_FLAG_SYN | TCP_FLAG_FIN,
+        "payload_len": 0,
+        "exp_fail": True,
+        "exp_reason": RC_MALFORMED,
+    },
+    {
+        "name": "Illegal TCP Flag Combo (SYN + RST)",
+        "eth_type": ETHERTYPE_IPV4,
+        "ip_version_ihl": 0x45,
+        "ip_protocol": IP_PROTO_TCP,
+        "ip_total_length": 40,
+        "l4_src_port": 54321,
+        "l4_dst_port": 80,
+        "l4_length": 20,
+        "tcp_flags": TCP_FLAG_SYN | TCP_FLAG_RST,
+        "payload_len": 0,
+        "exp_fail": True,
+        "exp_reason": RC_MALFORMED,
+    },
+    {
+        "name": "Illegal TCP Flag Combo (NULL Scan)",
+        "eth_type": ETHERTYPE_IPV4,
+        "ip_version_ihl": 0x45,
+        "ip_protocol": IP_PROTO_TCP,
+        "ip_total_length": 40,
+        "l4_src_port": 54321,
+        "l4_dst_port": 80,
+        "l4_length": 20,
+        "tcp_flags": 0x00,
+        "payload_len": 0,
+        "exp_fail": True,
+        "exp_reason": RC_MALFORMED,
+    },
+    {
+        "name": "Illegal TCP Flag Combo (FIN without ACK)",
+        "eth_type": ETHERTYPE_IPV4,
+        "ip_version_ihl": 0x45,
+        "ip_protocol": IP_PROTO_TCP,
+        "ip_total_length": 40,
+        "l4_src_port": 54321,
+        "l4_dst_port": 80,
+        "l4_length": 20,
+        "tcp_flags": TCP_FLAG_FIN,
+        "payload_len": 0,
+        "exp_fail": True,
+        "exp_reason": RC_MALFORMED,
+    },
+
+    # --- Rule 6: Length inconsistencies ---
+    {
+        "name": "Invalid IP Total Length (< 20 bytes)",
+        "eth_type": ETHERTYPE_IPV4,
+        "ip_version_ihl": 0x45,
+        "ip_protocol": IP_PROTO_TCP,
+        "ip_total_length": 19,
+        "l4_src_port": 54321,
+        "l4_dst_port": 80,
+        "l4_length": 20,
+        "tcp_flags": TCP_FLAG_SYN,
+        "payload_len": 0,
+        "exp_fail": True,
+        "exp_reason": RC_MALFORMED,
+    },
+    {
+        "name": "Invalid UDP L4 Length (< 8 bytes)",
+        "eth_type": ETHERTYPE_IPV4,
+        "ip_version_ihl": 0x45,
+        "ip_protocol": IP_PROTO_UDP,
+        "ip_total_length": 27,
+        "l4_src_port": 5353,
+        "l4_dst_port": 53,
+        "l4_length": 7,
+        "tcp_flags": 0x00,
+        "payload_len": 0,
+        "exp_fail": True,
+        "exp_reason": RC_MALFORMED,
+    },
+    {
+        "name": "Length Inconsistency (ip_total_length != ihl*4 + l4_length + payload_len)",
+        "eth_type": ETHERTYPE_IPV4,
+        "ip_version_ihl": 0x45,
+        "ip_protocol": IP_PROTO_TCP,
+        "ip_total_length": 50,
+        "l4_src_port": 54321,
+        "l4_dst_port": 80,
+        "l4_length": 20,
+        "tcp_flags": TCP_FLAG_SYN,
+        "payload_len": 0,
+        "exp_fail": True,
+        "exp_reason": RC_MALFORMED,
+    },
+]
+
+
+# =====================================================================
+# START OF SECTION 7: SELF-TEST AND VALIDATION SUITE
 # =====================================================================
 
 def run_self_test() -> bool:
     """Rigorous self-test verifying sizing, invariants, saturation, and classification."""
     print("====================================================================")
-    print("Threat Detection Lane (Lane 2) -- CMS Dual-Sketch Sizing & Model")
+    print("Threat Detection Lane (Lane 2) -- Reference Model & Self-Test Suite")
     print("====================================================================")
 
     # -----------------------------------------------------------------
@@ -363,8 +885,8 @@ def run_self_test() -> bool:
     total_bram = flow_sz["total_ramb36"] + host_sz["total_ramb36"]
 
     print("\n[1] Dual-Sketch Sizing & Memory Footprint:")
-    print(f"    Flow Sketch (Flood): w={flow_sz['width']}, k={flow_sz['depth']} -> {flow_sz['total_ramb36']} RAMB36, max error {flow_sz['max_error_packets']} pkts (ε={flow_sz['epsilon_pct']:.3f}%)")
-    print(f"    Host Sketch (Scan) : w={host_sz['width']}, k={host_sz['depth']} -> {host_sz['total_ramb36']} RAMB36, max error {host_sz['max_error_packets']} pkts (ε={host_sz['epsilon_pct']:.3f}%)")
+    print(f"    Flow Sketch (Flood): w={flow_sz['width']}, k={flow_sz['depth']} -> {flow_sz['total_ramb36']} RAMB36, max error {flow_sz['max_error_packets']} pkts (eps={flow_sz['epsilon_pct']:.3f}%)")
+    print(f"    Host Sketch (Scan) : w={host_sz['width']}, k={host_sz['depth']} -> {host_sz['total_ramb36']} RAMB36, max error {host_sz['max_error_packets']} pkts (eps={host_sz['epsilon_pct']:.3f}%)")
     print(f"    Total BRAM Usage   : {total_bram:.1f} of {XC7Z020_BRAM36_BUDGET} tiles ({total_bram / XC7Z020_BRAM36_BUDGET * 100:.1f}%)")
     assert total_bram <= XC7Z020_BRAM36_BUDGET, "Exceeded Lane 2 BRAM budget!"
     print("  --> PASS: Dual-sketch fits comfortably inside BRAM budget (52.2%).")
@@ -517,8 +1039,65 @@ def run_self_test() -> bool:
 
     print("  --> PASS: Under heavy collision noise, zero false alarms and zero evasions.")
 
+    # -----------------------------------------------------------------
+    # Test 5: Protocol Validator Header & Flag Invariant Verification
+    # -----------------------------------------------------------------
+    print("\n[5] Protocol Validator Header & Flag Rule Suite (17 Vectors):")
+    pv_passed = 0
+    for idx, vec in enumerate(PROTOCOL_VALIDATOR_TEST_VECTORS, 1):
+        fail, reason = validate_protocol(
+            eth_type=vec["eth_type"],
+            ip_version_ihl=vec["ip_version_ihl"],
+            ip_protocol=vec["ip_protocol"],
+            ip_total_length=vec["ip_total_length"],
+            l4_src_port=vec["l4_src_port"],
+            l4_dst_port=vec["l4_dst_port"],
+            l4_length=vec["l4_length"],
+            tcp_flags=vec["tcp_flags"],
+            payload_len=vec["payload_len"],
+        )
+        assert fail == vec["exp_fail"], (
+            f"Vector {idx} ({vec['name']}): expected fail={vec['exp_fail']}, got {fail}"
+        )
+        assert reason == vec["exp_reason"], (
+            f"Vector {idx} ({vec['name']}): expected reason={vec['exp_reason']}, got {reason}"
+        )
+        pv_passed += 1
+        status_str = "PASS" if not fail else f"BLOCKED ({reason:#x})"
+        print(f"    Vec {idx:02d}: {vec['name']:<42} -> {status_str}")
+
+    assert pv_passed == len(PROTOCOL_VALIDATOR_TEST_VECTORS)
+    print(f"  --> PASS: All {pv_passed} protocol validator test vectors verified bit-exact.")
+
+    # -----------------------------------------------------------------
+    # Test 6: CAM Matcher Signature Matching & Benign Controls
+    # -----------------------------------------------------------------
+    print("\n[6] CAM Signature Matcher Suite (16 Attack Patterns & Controls):")
+    cam = CAMMatcher()
+
+    for sig in CAM_SIGNATURES:
+        test_payload = b"HEADER_DATA_" + sig["pattern"] + b"_TRAILER_PADDING"
+        fail, reason, sig_id, offset = cam.scan_payload(test_payload)
+        assert fail, f"CAM missed signature: {sig['name']}"
+        assert reason == RC_SIGNATURE, f"CAM emitted wrong reason: {reason}"
+        assert sig_id == sig["id"], f"Wrong sig_id: expected {sig['id']}, got {sig_id}"
+        print(f"    Sig {sig['id']:02d}: {sig['name']:<20} (len={sig['len']:02d}) -> DETECTED (offset={offset})")
+
+    benign_samples = [
+        b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n",
+        b"POST /submit HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}",
+        b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f",
+        b"HELLO WORLD CLEAN TRAFFIC NORMAL USER STREAMING DATA",
+    ]
+    for b_idx, b_payload in enumerate(benign_samples, 1):
+        fail, reason, _, _ = cam.scan_payload(b_payload)
+        assert not fail, f"CAM false alarm on benign payload {b_idx}!"
+        assert reason == RC_NONE, f"CAM non-zero reason on benign payload: {reason}"
+    print("    Benign Controls (4 payloads)         -> ALL PASSED (0% false alarms)")
+    print("  --> PASS: All 16 threat signatures detected, zero false alarms on controls.")
+
     print("\n====================================================================")
-    print("ALL Lane 2 Dual-Sketch checks PASSED.")
+    print("ALL Lane 2 Dual-Sketch, Protocol Validator & CAM checks PASSED.")
     print("====================================================================")
     return True
 
