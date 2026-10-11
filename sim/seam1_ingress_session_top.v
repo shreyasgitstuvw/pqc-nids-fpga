@@ -65,7 +65,12 @@ module seam1_ingress_session_top (
     input  wire [15:0] nonce_adv_id,
 
     input  wire        clear_req,
-    input  wire [15:0] clear_id
+    input  wire [15:0] clear_id,
+
+    // protocol_validator verdict, so the parser -> detect seam is covered too
+    output wire        v_proto_valid,
+    output wire        v_proto_fail,
+    output wire [3:0]  v_proto_reason
 );
 
     wire [47:0] eth_dst_mac, eth_src_mac;
@@ -77,9 +82,7 @@ module seam1_ingress_session_top (
 
     // Header fields this fixture does not observe. Sunk explicitly so the
     // fixture lints as cleanly as the RTL it wires together.
-    wire _unused_ok = &{1'b0, eth_dst_mac, eth_src_mac, eth_type,
-                        ip_version_ihl, ip_total_length, ip_protocol,
-                        ip_dst_addr, l4_src_port, tcp_flags, l4_length,
+    wire _unused_ok = &{1'b0, eth_dst_mac, eth_src_mac, ip_dst_addr,
                         parser_session_id_unused, sid_evicted_unused};
 
     parser u_parser (
@@ -102,6 +105,28 @@ module seam1_ingress_session_top (
         .session_id(session_id), .sid_valid(sid_valid), .sid_hit(sid_hit),
         .sid_allocated(sid_allocated), .sid_evicted(sid_evicted_unused),
         .clear_req(clear_req), .clear_id(clear_id)
+    );
+
+    // Real protocol_validator on the real parser's header fields. l4_length is
+    // the field whose meaning was ambiguous: the parser used to publish the raw
+    // UDP Length value, which includes the payload, so the validator's
+    // 20 + l4_length + payload_len sum double-counted it and rejected every UDP
+    // packet carrying a payload as RC_MALFORMED.
+    protocol_validator u_proto (
+        .clk(clk), .rst(rst),
+        .header_valid(hdr_valid),
+        .eth_type(eth_type),
+        .ip_version_ihl(ip_version_ihl),
+        .ip_protocol(ip_protocol),
+        .ip_total_length(ip_total_length),
+        .l4_src_port(l4_src_port),
+        .l4_dst_port(l4_dst_port),
+        .l4_length(l4_length),
+        .tcp_flags(tcp_flags),
+        .payload_len(payload_len),
+        .verdict_valid(v_proto_valid),
+        .verdict_fail(v_proto_fail),
+        .verdict_reason(v_proto_reason)
     );
 
     session_mgr u_sess (

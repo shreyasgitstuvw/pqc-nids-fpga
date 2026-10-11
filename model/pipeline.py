@@ -87,7 +87,7 @@ class PacketBus:
     l4_src_port: int = 0      # 16 bits, big-endian source port
     l4_dst_port: int = 0      # 16 bits, big-endian destination port
     tcp_flags: int = 0        # 8 bits (TCP flags, 0x00 for UDP)
-    l4_length: int = 0        # 16 bits: TCP header len in bytes or UDP length field
+    l4_length: int = 0        # 16 bits: L4 HEADER length in bytes (TCP offset*4, UDP 8)
 
     # Classification & Session Metadata
     payload_len: int = 0      # 16 bits: payload length after headers
@@ -247,9 +247,15 @@ def parse_headers(raw: bytes) -> PacketBus:
 
         bus.l4_src_port = int.from_bytes(raw[l4_offset:l4_offset + 2], "big")
         bus.l4_dst_port = int.from_bytes(raw[l4_offset + 2:l4_offset + 4], "big")
-        bus.l4_length = int.from_bytes(raw[l4_offset + 4:l4_offset + 6], "big")
+        # Raw UDP Length field includes the payload; l4_length publishes the
+        # HEADER length for both protocols so protocol_validator.v's
+        # 20 + l4_length + payload_len sum works for TCP and UDP alike.
+        udp_len_field = int.from_bytes(raw[l4_offset + 4:l4_offset + 6], "big")
+        bus.l4_length = 8
         bus.tcp_flags = 0x00
-        if bus.l4_length < 8:
+        # A UDP Length below 8 is malformed -- check the raw field, not the
+        # published header length, which is now always 8.
+        if udp_len_field < 8:
             bus.valid = False
             bus.payload = raw[l4_offset + 8:]
             bus.payload_len = len(bus.payload)

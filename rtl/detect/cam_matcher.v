@@ -135,7 +135,16 @@ module cam_matcher (
         m_sig04, m_sig03, m_sig02, m_sig01
     };
 
-    wire any_match_now = pt_valid && (|match_vec);
+    // The window clear on pt_sof is registered, so during the pt_sof cycle the
+    // comparators still see the PREVIOUS packet's tail behind this packet's
+    // first byte. That produced a one-byte-wide cross-packet false match, with
+    // RC_SIGNATURE attributed to the wrong packet.
+    //
+    // A match also cannot be legitimate until the window holds at least as many
+    // bytes of this packet as the shortest signature (5). byte_counter + 1 is the
+    // 1-based index of the byte in b0, so that condition is byte_counter >= 4.
+    wire window_valid  = !pt_sof && (byte_counter >= 16'd4);
+    wire any_match_now = pt_valid && window_valid && (|match_vec);
 
     // Priority encoder for matched signature ID
     function [4:0] encode_sig_id;
@@ -241,20 +250,26 @@ module cam_matcher (
                     match_offset  <= (pt_sof ? 16'd1 : (byte_counter + 16'd1)) - {11'd0, get_sig_len(encode_sig_id(match_vec))};
                 end
 
-                // Latch EOF to trigger 1-cycle registered verdict strobe
-                if (pt_eof) begin
-                    eof_pending <= 1'b1;
-                end
             end
 
             // -----------------------------------------------------------------
             // Egress Verdict Generation (1 cycle after pt_eof)
             // -----------------------------------------------------------------
+            // The set and the clear of eof_pending are resolved in one place.
+            // Previously the clear sat later in this block and won, so a pt_eof
+            // arriving in the same cycle a pending EOF was being serviced was
+            // discarded -- one verdict for two packets. Contract section 6 makes
+            // that a liveness failure: a packet with no CAM strobe can never
+            // satisfy drop_engine's commit condition.
+            if (pt_valid && pt_eof)
+                eof_pending <= 1'b1;
+            else if (eof_pending)
+                eof_pending <= 1'b0;
+
             if (eof_pending) begin
                 v_cam_valid  <= 1'b1;
                 v_cam_fail   <= match_latched;
                 v_cam_reason <= match_latched ? `RC_SIGNATURE : `RC_NONE;
-                eof_pending  <= 1'b0;
             end
         end
     end

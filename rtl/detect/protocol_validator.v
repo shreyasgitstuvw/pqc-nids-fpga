@@ -110,6 +110,13 @@ module protocol_validator (
     );
 
     // Rule 6: Header & Total Length Consistency Checks
+    //
+    // l4_length is the L4 HEADER length in bytes for both protocols: TCP data
+    // offset * 4 (20 minimum), UDP always 8. parser.v used to publish the raw
+    // UDP Length field here instead, which already includes the payload, so
+    // this sum double-counted it and rejected every UDP packet carrying a
+    // payload as RC_MALFORMED. The parser now converts; see its STATE_UDP.
+    // IHL == 5 is guaranteed by Rule 2 above, so the IP header is 20 bytes.
     wire [16:0] expected_total = 17'd20 + {1'b0, l4_length} + {1'b0, payload_len};
 
     wire len_too_short_ip  = (ip_total_length < IPV4_MIN_TOTAL_LEN);

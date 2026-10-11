@@ -54,7 +54,7 @@ module parser (
     output reg [15:0]  l4_src_port,    // TCP/UDP Source Port (16 bits, big-endian)
     output reg [15:0]  l4_dst_port,    // TCP/UDP Destination Port (16 bits, big-endian)
     output reg [7:0]   tcp_flags,      // TCP Flags (8 bits, 0x00 for UDP)
-    output reg [15:0]  l4_length,      // TCP header length (bytes) or UDP length field
+    output reg [15:0]  l4_length,      // L4 HEADER length in bytes: TCP data offset*4, UDP always 8
 
     output reg [15:0]  payload_len,    // Calculated payload length in bytes
     output reg [15:0]  session_id,     // Session ID from lookup (default 16'd0)
@@ -98,12 +98,17 @@ module parser (
     reg [3:0]  tcp_offset_reg;
     reg [15:0] total_bytes_seen;
     reg [15:0] payload_bytes_sent;
+    reg [15:0] udp_len_field;   // raw UDP Length field (header + payload)
 
     // Combinational helper wires
     wire [15:0] eth_type_comb = {eth_type[15:8], in_data};
     wire [15:0] ip_ihl_bytes  = {10'd0, ip_ihl_reg, 2'b00};
     wire [15:0] tcp_hdr_bytes = {10'd0, tcp_offset_reg, 2'b00};
-    wire [15:0] udp_len_comb  = {l4_length[15:8], in_data};
+    // The raw UDP Length field includes the payload, so it is kept internal and
+            // used for the length checks below; the published l4_length is the L4
+            // HEADER length for both protocols, which is what protocol_validator.v
+            // and model/pipeline.py expect when summing 20 + l4_length + payload_len.
+    wire [15:0] udp_len_comb  = {udp_len_field[15:8], in_data};
 
     always @(posedge clk) begin
         if (rst) begin
@@ -132,6 +137,7 @@ module parser (
             l4_dst_port        <= 16'd0;
             tcp_flags          <= 8'd0;
             l4_length          <= 16'd0;
+            udp_len_field      <= 16'd0;
 
             payload_len        <= 16'd0;
             session_id         <= 16'd0;
@@ -483,9 +489,9 @@ module parser (
                             6'd1: l4_src_port[7:0]  <= in_data;
                             6'd2: l4_dst_port[15:8] <= in_data;
                             6'd3: l4_dst_port[7:0]  <= in_data;
-                            6'd4: l4_length[15:8]   <= in_data;
+                            6'd4: udp_len_field[15:8] <= in_data;
                             6'd5: begin
-                                l4_length[7:0] <= in_data;
+                                udp_len_field[7:0] <= in_data;
                                 if (udp_len_comb < 16'd8) begin
                                     parsed_ok <= 1'b0; // Malformed UDP Length (<8)
                                 end
@@ -514,7 +520,8 @@ module parser (
                             else
                                 packet_type <= PKT_RESERVED;
 
-                            if (ip_total_length < (ip_ihl_bytes + 16'd8) || l4_length < 16'd8) begin
+                            l4_length <= 16'd8;   // UDP header is always 8 bytes
+                            if (ip_total_length < (ip_ihl_bytes + 16'd8) || udp_len_field < 16'd8) begin
                                 payload_len <= 16'd0;
                                 parsed_ok   <= 1'b0;
                                 if (in_eof)
@@ -522,13 +529,13 @@ module parser (
                                 else
                                     state <= STATE_DRAIN;
                             end else begin
-                                payload_len <= l4_length - 16'd8;
+                                payload_len <= udp_len_field - 16'd8;
                                 if (in_eof) begin
-                                    if (l4_length > 16'd8) begin
+                                    if (udp_len_field > 16'd8) begin
                                         parsed_ok <= 1'b0; // Truncated payload
                                     end
                                     state <= STATE_IDLE;
-                                end else if (l4_length == 16'd8) begin
+                                end else if (udp_len_field == 16'd8) begin
                                     state <= STATE_DRAIN; // Zero payload, drain padding
                                 end else begin
                                     state <= STATE_PAYLOAD;

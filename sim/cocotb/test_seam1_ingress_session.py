@@ -19,6 +19,12 @@
 #   seam1_session_id_stable_before_sof    session_id settles before the payload
 #                                         streams, as contract section 3 requires
 #   seam1_three_peers_independent         three concurrent sessions stay separate
+#   seam1_udp_data_passes_the_validator   a well-formed UDP DATA packet is NOT
+#                                         rejected as malformed -- parser.v used
+#                                         to publish the raw UDP Length field as
+#                                         l4_length, which includes the payload,
+#                                         so protocol_validator's length sum
+#                                         double-counted it
 #==========================================================================
 
 import os
@@ -205,6 +211,48 @@ async def seam1_three_peers_independent(dut):
 
 # ==============================================================================
 # Runner for pytest / command-line execution
+
+@cocotb.test()
+async def seam1_udp_data_passes_the_validator(dut):
+    """A well-formed UDP DATA packet must pass protocol_validator. parser.v
+    published the raw UDP Length field (header + payload) as l4_length, while
+    the validator sums 20 + l4_length + payload_len, so the payload was counted
+    twice and every UDP packet carrying a payload was rejected as RC_MALFORMED.
+    The parser now publishes the L4 header length for both protocols."""
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    await reset_dut(dut)
+
+    verdicts = []
+
+    async def mon():
+        while True:
+            await FallingEdge(dut.clk)
+            if int(dut.v_proto_valid.value):
+                verdicts.append((int(dut.v_proto_fail.value),
+                                 int(dut.v_proto_reason.value),
+                                 int(dut.l4_length.value)))
+
+    cocotb.start_soon(mon())
+
+    async def one(payload, protocol, label):
+        verdicts.clear()
+        await send(dut, build_packet(IP_A, PORT_DATA, payload, protocol=protocol))
+        assert verdicts, f"{label}: protocol_validator never strobed"
+        return verdicts[-1]
+
+    for n in (1, 16, 100, 400):
+        fail, reason, l4len = await one(b"U" * n, 17, f"UDP payload {n}")
+        assert l4len == 8, f"UDP payload {n}: l4_length {l4len}, expected the 8-byte header"
+        assert fail == 0, f"UDP payload {n}: validator said malformed (reason {reason:#x})"
+
+    fail, reason, l4len = await one(b"T" * 100, 6, "TCP payload 100")
+    assert l4len == 20, f"TCP l4_length {l4len}, expected the 20-byte header"
+    assert fail == 0, f"TCP DATA rejected (reason {reason:#x})"
+
+    fail, reason, _ = await one(b"X" * 32, 1, "ICMP")
+    assert fail == 1, "ICMP should be rejected"
+    assert reason == 0x3, f"ICMP reason {reason:#x}, expected RC_MALFORMED"
+
 # ==============================================================================
 import pytest
 
@@ -218,10 +266,12 @@ def test_runner(sim_build):
         os.path.join(proj_path, "rtl", "ingress", "parser.v"),
         os.path.join(proj_path, "rtl", "control", "session_lookup.v"),
         os.path.join(proj_path, "rtl", "control", "session_mgr.v"),
+        os.path.join(proj_path, "rtl", "detect", "protocol_validator.v"),
         os.path.join(proj_path, "sim", "seam1_ingress_session_top.v"),
     ]
     includes = [os.path.join(proj_path, "rtl", "control"),
-                os.path.join(proj_path, "rtl", "ingress")]
+                os.path.join(proj_path, "rtl", "ingress"),
+                os.path.join(proj_path, "rtl", "detect")]
     runner = get_runner("icarus")
     runner.build(verilog_sources=sources, includes=includes,
                  hdl_toplevel="seam1_ingress_session_top",

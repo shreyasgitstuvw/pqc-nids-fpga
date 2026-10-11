@@ -227,6 +227,81 @@ async def run_cam_back_to_back_streaming(dut):
         assert reason_hw == exp_reason, f"Packet {p_idx}: expected reason {exp_reason:#x}, got {reason_hw:#x}"
 
 
+
+# ==============================================================================
+# Regressions for the two defects found in docs/INTEGRATION-READINESS-REVIEW.md.
+# ==============================================================================
+
+async def send_back_to_back(dut, packets):
+    """Stream several packets with NO idle cycle between them, counting every
+    v_cam_valid strobe and every failing verdict."""
+    verdicts = []
+
+    async def mon():
+        while True:
+            await FallingEdge(dut.clk)
+            if int(dut.v_cam_valid.value):
+                verdicts.append((int(dut.v_cam_fail.value),
+                                 int(dut.v_cam_reason.value)))
+
+    task = cocotb.start_soon(mon())
+    for pkt in packets:
+        for idx, b in enumerate(pkt):
+            dut.pt_valid.value = 1
+            dut.pt_data.value = b
+            dut.pt_sof.value = 1 if idx == 0 else 0
+            dut.pt_eof.value = 1 if idx == len(pkt) - 1 else 0
+            await FallingEdge(dut.clk)
+    dut.pt_valid.value = 0
+    dut.pt_sof.value = 0
+    dut.pt_eof.value = 0
+    for _ in range(6):
+        await FallingEdge(dut.clk)
+    task.kill()
+    return verdicts
+
+
+@cocotb.test()
+async def cam_no_cross_packet_false_match(dut):
+    """The pt_sof window clear is registered, so during the sof cycle the
+    comparators used to see the previous packet's tail behind this packet's
+    first byte. A signature split across the boundary then raised RC_SIGNATURE
+    on the wrong packet."""
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    await reset_dut(dut)
+
+    # "whoami" is signature 16. Split it so the last byte starts a new packet.
+    verdicts = await send_back_to_back(dut, [b"PLAIN-whoam", b"iPLAIN"])
+    assert len(verdicts) == 2, f"expected one verdict per packet, got {verdicts}"
+    assert verdicts[0] == (0, RC_NONE), f"packet 1 should be clean: {verdicts[0]}"
+    assert verdicts[1] == (0, RC_NONE), (
+        f"packet 2 matched using packet 1's bytes: {verdicts[1]}")
+
+    # A signature wholly inside one packet must still be caught.
+    await reset_dut(dut)
+    verdicts = await send_back_to_back(dut, [b"PLAIN-whoami-X"])
+    assert verdicts == [(1, RC_SIGNATURE)], f"in-packet signature missed: {verdicts}"
+
+
+@cocotb.test()
+async def cam_back_to_back_eof_both_report(dut):
+    """eof_pending was set earlier in the always block than it was cleared, so a
+    pt_eof arriving in the cycle a pending EOF was serviced was discarded -- one
+    verdict for two packets. A packet with no CAM strobe can never satisfy
+    drop_engine's commit condition, so that is a liveness failure."""
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    await reset_dut(dut)
+
+    # 5-byte packet immediately followed by a 1-byte packet (sof and eof together)
+    verdicts = await send_back_to_back(dut, [b"HELLO", b"X"])
+    assert len(verdicts) == 2, f"expected 2 verdicts for 2 packets, got {verdicts}"
+
+    # and a run of single-byte packets, the tightest case there is
+    await reset_dut(dut)
+    verdicts = await send_back_to_back(dut, [b"A", b"B", b"C", b"D"])
+    assert len(verdicts) == 4, f"expected 4 verdicts for 4 packets, got {verdicts}"
+    assert all(v == (0, RC_NONE) for v in verdicts), verdicts
+
 def test_runner():
     """pytest entry point using cocotb.runner and iverilog."""
     from cocotb.runner import get_runner
