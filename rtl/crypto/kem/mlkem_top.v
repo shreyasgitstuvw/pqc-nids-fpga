@@ -2,7 +2,25 @@
 // rtl/crypto/kem/mlkem_top.v
 //
 // ML-KEM-512 Top-Level Cryptographic Engine (FIPS 203).
-// Milestone (a): KeyGen internal with real instantiated datapaths:
+// KeyGen (Alg 19), Encaps (Alg 17/20) and Decaps (Alg 18/21, implicit rejection)
+// on one shared datapath, plus packet-bus handshake ingest:
+//   - HS_INIT (800 B ek) -> dk_ram[96..195] -> Encaps;  HS_RESP (768 B c) -> c_ram -> Decaps
+//   - wrong payload_len / cut-short / over-long packet -> kem_key_invalid + v_kem_* + 4'h8
+//   - Decaps never strobes a verdict or kem_key_invalid; kem_done timing does not depend on c
+// Design decisions closed in this revision:
+//   * Separate ek store: an incoming/loaded ek lives in ek_ram[0..99] (100 x 64 bit).
+//     Encaps reads ek_ram; KeyGen and Decaps use dk_ram. A stored dk is therefore
+//     never overwritten by an Encaps, and both roles can be served by one device.
+//   * Entropy: ingest-driven Encaps takes its 32-byte m from rng_data under a
+//     valid/take handshake (rng_valid / rng_take). One valid interval yields one seed:
+//     rng_lock keeps the seed from being consumed twice, so m is never reused. The
+//     source (PS/TRNG, Member A item) must drop rng_valid after rng_take and raise
+//     it again with a fresh word. seed_d/seed_z/seed_m remain direct KAT-mode inputs
+//     (cmd_start path only).
+//   * No queuing: the bus has no backpressure, so a handshake SOF arriving while the
+//     core is busy is dropped and kem_pkt_dropped_busy pulses for one cycle (telemetry
+//     only; it is not a verdict and carries no secret-dependent information).
+// Datapath:
 //   - 1x shake_wrapper (with keccak_f1600 sponge)
 //   - 1x sample_ntt (FIPS 203 Alg 7 rejection sampler)
 //   - 1x cbd_sampler (FIPS 203 Alg 8 CBD sampler)
@@ -64,6 +82,13 @@ module mlkem_top (
     input  wire [255:0] seed_m,            // 32-byte message m for Encaps/KAT
     output wire         busy,
 
+    // Entropy source for ingest-driven Encaps (one seed per valid interval)
+    input  wire         rng_valid,
+    input  wire [255:0] rng_data,
+    output reg          rng_take,          // 1-cycle strobe: rng_data consumed
+    // Telemetry: handshake SOF dropped because the core was busy
+    output reg          kem_pkt_dropped_busy,
+
     // Decapsulation Key Memory Read Port (for verification & external consumers)
     input  wire [7:0]   dk_ram_rd_addr,    // 0..203 (204 words = 1632 bytes)
     output wire [63:0]  dk_ram_rdata,
@@ -72,8 +97,14 @@ module mlkem_top (
     input  wire         dk_ram_wr_en,
     input  wire [7:0]   dk_ram_wr_addr_ext,
     input  wire [63:0]  dk_ram_wr_data_ext,
+    input  wire         ek_ram_wr_en,
+    input  wire [6:0]   ek_ram_wr_addr_ext,
+    input  wire [63:0]  ek_ram_wr_data_ext,
     input  wire [6:0]   c_ram_rd_addr_ext,
-    output wire [63:0]  c_ram_rdata_ext
+    output wire [63:0]  c_ram_rdata_ext,
+    input  wire         c_ram_wr_en,
+    input  wire [6:0]   c_ram_wr_addr_ext,
+    input  wire [63:0]  c_ram_wr_data_ext
 );
 
     // Operational Modes
@@ -148,10 +179,46 @@ module mlkem_top (
         S_ENC_V_ADD3_WAIT   = 7'd54,
         S_ENC_C_START       = 7'd55,
         S_ENC_C_STREAM      = 7'd56,
-        S_ENC_C_DRAIN       = 7'd57;
+        S_ENC_C_DRAIN       = 7'd57,
+
+        // Decapsulation States
+        S_DEC_J_INIT        = 7'd58,
+        S_DEC_J_PREFETCH    = 7'd59,
+        S_DEC_J_FEED        = 7'd60,
+        S_DEC_J_SQUEEZE     = 7'd61,
+        S_LP_SETUP          = 7'd62,
+        S_LP_PREFETCH       = 7'd63,
+        S_LP_FEED           = 7'd64,
+        S_DC_NTT_START      = 7'd65,
+        S_DC_NTT_WAIT       = 7'd66,
+        S_DC_MUL_START      = 7'd67,
+        S_DC_MUL_WAIT       = 7'd68,
+        S_DC_INTT_WAIT      = 7'd69,
+        S_DC_SUB_START      = 7'd70,
+        S_DC_SUB_WAIT       = 7'd71,
+        S_DC_M_START        = 7'd72,
+        S_DC_M_STREAM       = 7'd73,
+        S_DC_M_DRAIN        = 7'd74,
+        S_ING_ENC_GO        = 7'd75;
 
     reg [6:0] state_r;
     reg [2:0] current_poly;
+    // Decaps / generic polynomial-loader state
+    reg [1:0]   op_r;
+    reg         is_decaps;
+    reg [255:0] m_reg;
+    reg [255:0] reg_kbar;
+    reg         c_match;
+    reg [7:0]   c_cmp_cnt;
+    reg [2:0]   lp_step;
+    reg         lp_src_c;
+    reg [1:0]   lp_mode;
+    reg [7:0]   lp_addr0;
+    reg [5:0]   lp_nwords;
+    reg [2:0]   lp_bank;
+    reg         lp_in_valid;
+    reg [7:0]   lp_wr_idx;
+    wire        lp_sel_ready;
 
     // -------------------------------------------------------------------------
     // 8 Dual-Port Polynomial RAM Banks (Bank 0 .. 7)
@@ -195,9 +262,6 @@ module mlkem_top (
     wire [6:0] c_ram_addr = busy ? int_c_rd_addr : c_ram_rd_addr_ext;
     reg [63:0] c_ram_rdata_r;
 
-    always @(posedge clk) begin
-        c_ram_rdata_r <= c_ram[c_ram_addr];
-    end
     assign c_ram_rdata_ext = c_ram_rdata_r;
 
     // -------------------------------------------------------------------------
@@ -225,10 +289,12 @@ module mlkem_top (
     wire        dec_in_ready;
 
     // Multiplex absorb port for Phase 5 (SHA3-256 over dk_ram[96..195])
-    wire [63:0] shake_in_data  = (state == 7'd21) ? dk_ram_b_rdata : fsm_shake_in_data;
-    wire [3:0]  shake_in_bytes = (state == 7'd21) ? 4'd8 : fsm_shake_in_bytes;
+    wire [63:0] shake_in_data  = (state == 7'd21) ? dk_ram_b_rdata :
+                                 (state == S_DEC_J_FEED) ? ((words_written < 8'd4) ? dk_ram_b_rdata : c_ram_rdata_r) :
+                                 fsm_shake_in_data;
+    wire [3:0]  shake_in_bytes = ((state == 7'd21) || (state == S_DEC_J_FEED)) ? 4'd8 : fsm_shake_in_bytes;
     wire        shake_in_valid = (state == 7'd21) ? fsm_shake_in_valid : fsm_shake_in_valid;
-    wire        shake_in_last  = (state == 7'd21) ? (words_written == 8'd99) : fsm_shake_in_last;
+    wire        shake_in_last  = ((state == 7'd21) || (state == S_DEC_J_FEED)) ? (words_written == 8'd99) : fsm_shake_in_last;
 
     wire sntt_busy;
     wire cbd_busy;
@@ -240,11 +306,28 @@ module mlkem_top (
 
     wire dk_ram_rd_en = !busy || (state == 7'd25) || ((state == 7'd21) && shake_in_ready)
                         || (state == 7'd26) || ((state == 7'd27) && dec_in_ready)
-                        || (state == 7'd29);
+                        || (state == 7'd29)
+                        || (state == S_DEC_J_PREFETCH) || ((state == S_DEC_J_FEED) && shake_in_ready)
+                        || (state == S_LP_PREFETCH) || ((state == S_LP_FEED) && lp_sel_ready);
 
+    // Encapsulation-key store (separate from dk_ram so a stored dk survives an Encaps).
+    // While an Encaps runs, the dk_ram read port is served from ek_ram[addr-96].
+    reg  [63:0] ek_ram [0:99];
+    wire [7:0]  ek_rd_off = dk_ram_b_addr - 8'd96;
+    wire        rd_from_ek = busy && (op_r == OP_ENCAPS);
     always @(posedge clk) begin
         if (dk_ram_rd_en) begin
-            dk_ram_b_rdata <= dk_ram[dk_ram_b_addr];
+            dk_ram_b_rdata <= rd_from_ek ? ek_ram[(ek_rd_off < 8'd100) ? ek_rd_off[6:0] : 7'd0]
+                                         : dk_ram[dk_ram_b_addr];
+        end
+    end
+
+    // c_ram synchronous read; rdata is frozen while the consumer stalls
+    wire c_ram_rd_en = !busy || (state == S_LP_PREFETCH) || ((state == S_LP_FEED) && lp_sel_ready)
+                       || (state == S_DEC_J_PREFETCH) || ((state == S_DEC_J_FEED) && shake_in_ready);
+    always @(posedge clk) begin
+        if (c_ram_rd_en) begin
+            c_ram_rdata_r <= c_ram[c_ram_addr];
         end
     end
 
@@ -467,7 +550,8 @@ module mlkem_top (
     reg         dec_start_poly;
     wire        dec_busy, dec_err_non_canonical, dec_out_valid;
     reg         dec_check_modulus;
-    wire [63:0] dec_in_data = dk_ram_b_rdata;
+    wire [63:0] lp_in_data  = lp_src_c ? c_ram_rdata_r : dk_ram_b_rdata;
+    wire [63:0] dec_in_data = lp_in_data;
     reg         dec_in_valid;
     wire [11:0] dec_out_data;
     reg  [2:0]  dec_target_bank;
@@ -481,7 +565,7 @@ module mlkem_top (
         .check_modulus     (dec_check_modulus),
         .err_non_canonical (dec_err_non_canonical),
         .in_data           (dec_in_data),
-        .in_valid          (dec_in_valid),
+        .in_valid          (dec_in_valid | (lp_in_valid & (lp_mode == 2'd0))),
         .in_ready          (dec_in_ready),
         .out_valid         (dec_out_valid),
         .out_data          (dec_out_data)
@@ -552,27 +636,131 @@ module mlkem_top (
         .poly_last  (enc4_poly_last)
     );
 
+    // Decaps: m' = ByteEncode1(Compress1(w))
+    reg         enc1_start_poly;
+    wire        enc1_busy, enc1_overflow, enc1_poly_last, enc1_out_valid;
+    wire        comp1_out_valid;
+    wire [0:0]  comp1_out_data;
+    wire [63:0] enc1_out_data;
+    compress #(.D(1)) u_comp1 (
+        .clk       (clk),
+        .rst       (rst),
+        .in_valid  ((state_r == S_DC_M_STREAM) && enc_read_valid),
+        .in_data   (bank_dout_a[enc_bank]),
+        .out_valid (comp1_out_valid),
+        .out_data  (comp1_out_data)
+    );
+    byte_encode #(.D(1)) u_encode1 (
+        .clk        (clk),
+        .rst        (rst),
+        .start_poly (enc1_start_poly),
+        .busy       (enc1_busy),
+        .overflow   (enc1_overflow),
+        .in_valid   (comp1_out_valid),
+        .in_data    (comp1_out_data),
+        .out_data   (enc1_out_data),
+        .out_valid  (enc1_out_valid),
+        .out_ready  (1'b1),
+        .poly_last  (enc1_poly_last)
+    );
+
     wire enc_c_word_valid = (current_poly < 3'd2) ? enc10_out_valid : enc4_out_valid;
     wire [63:0] enc_c_word_data = (current_poly < 3'd2) ? enc10_out_data : enc4_out_data;
+
+    // -------------------------------------------------------------------------
+    // Decaps unpack path: ByteDecode10/4 + Decompress10/4 (u', v') and the
+    // generic polynomial loader mux (mode 0: D=12, 1: D=10, 2: D=4)
+    // -------------------------------------------------------------------------
+    reg         lp_start10, lp_start4;
+    wire        dec10_busy, dec10_err, dec10_in_ready, dec10_out_valid;
+    wire [11:0] dec10_out_data;
+    byte_decode #(.D(10)) u_decode10 (
+        .clk               (clk),
+        .rst               (rst),
+        .start_poly        (lp_start10),
+        .busy              (dec10_busy),
+        .check_modulus     (1'b0),
+        .err_non_canonical (dec10_err),
+        .in_data           (lp_in_data),
+        .in_valid          (lp_in_valid & (lp_mode == 2'd1)),
+        .in_ready          (dec10_in_ready),
+        .out_valid         (dec10_out_valid),
+        .out_data          (dec10_out_data)
+    );
+    wire        dec4_busy, dec4_err, dec4_in_ready, dec4_out_valid;
+    wire [11:0] dec4_out_data;
+    byte_decode #(.D(4)) u_decode4 (
+        .clk               (clk),
+        .rst               (rst),
+        .start_poly        (lp_start4),
+        .busy              (dec4_busy),
+        .check_modulus     (1'b0),
+        .err_non_canonical (dec4_err),
+        .in_data           (lp_in_data),
+        .in_valid          (lp_in_valid & (lp_mode == 2'd2)),
+        .in_ready          (dec4_in_ready),
+        .out_valid         (dec4_out_valid),
+        .out_data          (dec4_out_data)
+    );
 
     wire decomp10_out_valid;
     wire [11:0] decomp10_out_data;
     decompress #(.D(10)) u_decomp10 (
         .clk       (clk),
         .rst       (rst),
-        .in_valid  (1'b0),
-        .in_data   (10'd0),
+        .in_valid  (dec10_out_valid),
+        .in_data   (dec10_out_data[9:0]),
         .out_valid (decomp10_out_valid),
         .out_data  (decomp10_out_data)
     );
+    wire decomp4_out_valid;
+    wire [11:0] decomp4_out_data;
+    decompress #(.D(4)) u_decomp4 (
+        .clk       (clk),
+        .rst       (rst),
+        .in_valid  (dec4_out_valid),
+        .in_data   (dec4_out_data[3:0]),
+        .out_valid (decomp4_out_valid),
+        .out_data  (decomp4_out_data)
+    );
+
+    assign lp_sel_ready = (lp_mode == 2'd0) ? dec_in_ready :
+                          (lp_mode == 2'd1) ? dec10_in_ready : dec4_in_ready;
+    wire        lp_fin_valid = (lp_mode == 2'd0) ? dec_out_valid :
+                               (lp_mode == 2'd1) ? decomp10_out_valid : decomp4_out_valid;
+    wire [11:0] lp_fin_data  = (lp_mode == 2'd0) ? dec_out_data :
+                               (lp_mode == 2'd1) ? decomp10_out_data : decomp4_out_data;
 
     wire packer_in_ready, packer_out_valid, packer_out_last;
     wire [63:0] packer_out_data;
     wire [3:0]  packer_out_bytes;
+    // ---- Packet-bus handshake ingest (milestone d) -------------------------
+    // HS_INIT (type 2'b00): 800 B ek  -> dk_ram[96..195], then auto-start Encaps
+    // HS_RESP (type 2'b10): 768 B c   -> c_ram[0..95],    then auto-start Decaps
+    // Anything else (DATA, other ports) is ignored. A wrong payload_len, a packet
+    // cut short by a new SOF, or an over-long packet is a STRUCTURAL failure
+    // (kem_key_invalid + v_kem_* + RC_HANDSHAKE_KEY_INVALID). Packets that arrive
+    // while the core is busy are ignored (the single compute core is not queued).
+    reg         ing_active;
+    reg         ing_hs_init;     // 1: HS_INIT (ek), 0: HS_RESP (c)
+    reg [15:0]  ing_sid;
+    reg [7:0]   ing_wcnt;
+    reg         pk_clr;          // 1-cycle packer flush after an aborted packet
+    reg         m_have;          // m captured from rng for the current HS_INIT packet
+    reg         rng_lock;        // set on take, cleared when rng_valid drops
+
+    wire        ing_type_ok  = (packet_bus_packet_type == 2'b00) || (packet_bus_packet_type == 2'b10);
+    wire        ing_len_ok   = (packet_bus_packet_type == 2'b00) ? (packet_bus_payload_len == 16'd800)
+                                                                 : (packet_bus_payload_len == 16'd768);
+    wire        ing_sof_hit  = packet_bus_valid && packet_bus_sof && !ing_active && !cmd_start
+                               && (state_r == S_IDLE) && ing_type_ok;
+    wire        ing_sof_take = ing_sof_hit && ing_len_ok;
+    wire        pk_in_valid  = packet_bus_valid && (ing_active || ing_sof_take) && !pk_clr;
+
     pack_8_to_64 u_packer (
         .clk       (clk),
-        .rst       (rst),
-        .in_valid  (packet_bus_valid),
+        .rst       (rst | pk_clr),
+        .in_valid  (pk_in_valid),
         .in_data   (packet_bus_data),
         .in_eof    (packet_bus_eof),
         .in_ready  (packer_in_ready),
@@ -636,14 +824,18 @@ module mlkem_top (
                 bank_addr_a[b] = cbd_poly_mem_addr[7:0];
                 bank_we_a[b]   = cbd_poly_mem_we;
                 bank_din_a[b]  = cbd_poly_mem_wdata;
-            end else if (dec_out_valid && (dec_target_bank == b[2:0])) begin
+            end else if ((state_r == S_LP_FEED) && lp_fin_valid && (lp_bank == b[2:0])) begin
+                bank_addr_a[b] = lp_wr_idx;
+                bank_we_a[b]   = 1'b1;
+                bank_din_a[b]  = lp_fin_data;
+            end else if ((state_r == S_ENC_DEC_FEED) && dec_out_valid && (dec_target_bank == b[2:0])) begin
                 bank_addr_a[b] = dec_coeff_idx;
                 bank_we_a[b]   = 1'b1;
                 bank_din_a[b]  = dec_out_data;
             end else if ((state_r == S_ENC_V_EXP_M) && (b == 2)) begin
                 bank_addr_a[b] = enc_coeff_idx;
                 bank_we_a[b]   = 1'b1;
-                bank_din_a[b]  = seed_m[enc_coeff_idx] ? 12'd1665 : 12'd0;
+                bank_din_a[b]  = m_reg[enc_coeff_idx] ? 12'd1665 : 12'd0;
             end else if (ntt_busy && (ntt_target_bank == b[2:0])) begin
                 bank_addr_a[b] = ntt_mem_a_addr;
                 bank_we_a[b]   = ntt_mem_a_we;
@@ -666,7 +858,7 @@ module mlkem_top (
                 end else if (add_op_b_bank == b[2:0]) begin
                     bank_addr_a[b] = add_rd_addr;
                 end
-            end else if (((state_r == S_ENC_STREAM) || (state_r == S_ENC_C_STREAM)) && (enc_bank == b[2:0])) begin
+            end else if (((state_r == S_ENC_STREAM) || (state_r == S_ENC_C_STREAM) || (state_r == S_DC_M_STREAM)) && (enc_bank == b[2:0])) begin
                 bank_addr_a[b] = enc_coeff_idx;
             end
 
@@ -754,7 +946,38 @@ module mlkem_top (
             dec_coeff_idx       <= 8'd0;
             enc10_start_poly    <= 1'b0;
             enc4_start_poly     <= 1'b0;
+            op_r                <= 2'd0;
+            is_decaps           <= 1'b0;
+            m_reg               <= 256'd0;
+            reg_kbar            <= 256'd0;
+            c_match             <= 1'b0;
+            c_cmp_cnt           <= 8'd0;
+            lp_step             <= 3'd0;
+            lp_src_c            <= 1'b0;
+            lp_mode             <= 2'd0;
+            lp_addr0            <= 8'd0;
+            lp_nwords           <= 6'd0;
+            lp_bank             <= 3'd0;
+            lp_in_valid         <= 1'b0;
+            lp_wr_idx           <= 8'd0;
+            lp_start10          <= 1'b0;
+            lp_start4           <= 1'b0;
+            enc1_start_poly     <= 1'b0;
+            ing_active          <= 1'b0;
+            ing_hs_init         <= 1'b0;
+            ing_sid             <= 16'd0;
+            ing_wcnt            <= 8'd0;
+            pk_clr              <= 1'b0;
+            m_have              <= 1'b0;
+            rng_lock            <= 1'b0;
+            rng_take            <= 1'b0;
+            kem_pkt_dropped_busy<= 1'b0;
         end else begin
+            pk_clr          <= 1'b0;
+            rng_take        <= 1'b0;
+            kem_pkt_dropped_busy <= packet_bus_valid && packet_bus_sof && ing_type_ok && !ing_active
+                                    && (state_r != S_IDLE);
+            if (!rng_valid) rng_lock <= 1'b0;
             kem_done        <= 1'b0;
             kem_key_invalid <= 1'b0;
             v_kem_valid     <= 1'b0;
@@ -770,17 +993,31 @@ module mlkem_top (
             dec_start_poly  <= 1'b0;
             enc10_start_poly<= 1'b0;
             enc4_start_poly <= 1'b0;
+            enc1_start_poly <= 1'b0;
+            lp_start10      <= 1'b0;
+            lp_start4       <= 1'b0;
 
+            if (!busy && c_ram_wr_en) begin
+                c_ram[c_ram_wr_addr_ext] <= c_ram_wr_data_ext;
+            end
+            if (!busy && ek_ram_wr_en) begin
+                ek_ram[ek_ram_wr_addr_ext] <= ek_ram_wr_data_ext;
+            end
             if (!busy && dk_ram_wr_en) begin
                 dk_ram[dk_ram_wr_addr_ext] <= dk_ram_wr_data_ext;
             end
 
             case (state_r)
                 S_IDLE: begin
-                    if (cmd_start && (cmd_op == OP_KEYGEN)) begin
+                    if (cmd_start && !ing_active && (cmd_op == OP_KEYGEN)) begin
                         kem_session_id <= (cmd_session_id == 16'd0) ? 16'd1 : cmd_session_id;
+                        op_r           <= OP_KEYGEN;
+                        is_decaps      <= 1'b0;
                         state_r        <= S_G_INIT;
-                    end else if (cmd_start && (cmd_op == OP_ENCAPS)) begin
+                    end else if (cmd_start && !ing_active && (cmd_op == OP_ENCAPS)) begin
+                        op_r              <= OP_ENCAPS;
+                        is_decaps         <= 1'b0;
+                        m_reg             <= seed_m;
                         kem_session_id    <= (cmd_session_id == 16'd0) ? 16'd1 : cmd_session_id;
                         dec_start_poly    <= 1'b1;
                         dec_check_modulus <= 1'b1;
@@ -789,6 +1026,67 @@ module mlkem_top (
                         int_dk_rd_addr    <= 8'd96;
                         words_written_r   <= 8'd0;
                         state_r           <= S_ENC_DEC_PREFETCH;
+                    end else if (cmd_start && !ing_active && (cmd_op == OP_DECAPS)) begin
+                        kem_session_id    <= (cmd_session_id == 16'd0) ? 16'd1 : cmd_session_id;
+                        op_r              <= OP_DECAPS;
+                        is_decaps         <= 1'b1;
+                        c_match           <= 1'b1;
+                        c_cmp_cnt         <= 8'd0;
+                        state_r           <= S_DEC_J_INIT;
+                    end else if (ing_sof_hit && !ing_len_ok) begin
+                        // Wrong payload_len on a handshake packet: structural failure, nothing ingested.
+                        kem_session_id <= (packet_bus_session_id == 16'd0) ? 16'd1 : packet_bus_session_id;
+                        state_r        <= S_STRUCT_FAIL;
+                    end else if (ing_sof_take) begin
+                        ing_active  <= 1'b1;
+                        ing_hs_init <= (packet_bus_packet_type == 2'b00);
+                        ing_sid     <= (packet_bus_session_id == 16'd0) ? 16'd1 : packet_bus_session_id;
+                        ing_wcnt    <= 8'd0;
+                        m_have      <= 1'b0;
+                    end else if (ing_active) begin
+                        // Capture one fresh seed while the ek streams in (never reuse a seed).
+                        if (ing_hs_init && !m_have && rng_valid && !rng_lock) begin
+                            m_reg    <= rng_data;
+                            m_have   <= 1'b1;
+                            rng_take <= 1'b1;
+                            rng_lock <= 1'b1;
+                        end
+                        if (packet_bus_valid && packet_bus_sof) begin
+                            // New SOF before EOF: previous packet was cut short.
+                            ing_active     <= 1'b0;
+                            pk_clr         <= 1'b1;
+                            kem_session_id <= ing_sid;
+                            state_r        <= S_STRUCT_FAIL;
+                        end else if (packer_out_valid) begin
+                            if (ing_hs_init) ek_ram[(ing_wcnt < 8'd100) ? ing_wcnt[6:0] : 7'd0] <= packer_out_data;
+                            else             c_ram[ing_wcnt[6:0]]     <= packer_out_data;
+                            ing_wcnt <= ing_wcnt + 8'd1;
+                            if (packer_out_last) begin
+                                ing_active <= 1'b0;
+                                if (ing_wcnt == (ing_hs_init ? 8'd99 : 8'd95)) begin
+                                    kem_session_id <= ing_sid;
+                                    if (ing_hs_init) begin
+                                        state_r           <= S_ING_ENC_GO;
+                                    end else begin
+                                        op_r              <= OP_DECAPS;
+                                        is_decaps         <= 1'b1;
+                                        c_match           <= 1'b1;
+                                        c_cmp_cnt         <= 8'd0;
+                                        state_r           <= S_DEC_J_INIT;
+                                    end
+                                end else begin
+                                    // EOF at the wrong word count: truncated packet.
+                                    kem_session_id <= ing_sid;
+                                    state_r        <= S_STRUCT_FAIL;
+                                end
+                            end else if (ing_wcnt == (ing_hs_init ? 8'd99 : 8'd95)) begin
+                                // Over-long packet: more words than the object holds.
+                                ing_active     <= 1'b0;
+                                pk_clr         <= 1'b1;
+                                kem_session_id <= ing_sid;
+                                state_r        <= S_STRUCT_FAIL;
+                            end
+                        end
                     end
                 end
 
@@ -1129,17 +1427,17 @@ module mlkem_top (
                     fsm_shake_out_ready <= 1'b1;
                     if (shake_out_valid && fsm_shake_out_ready) begin
                         case (feed_cnt)
-                            3'd0: begin reg_hek[ 63:  0] <= shake_out_data; if (cmd_op == OP_KEYGEN) dk_ram[8'd196] <= shake_out_data; end
-                            3'd1: begin reg_hek[127: 64] <= shake_out_data; if (cmd_op == OP_KEYGEN) dk_ram[8'd197] <= shake_out_data; end
-                            3'd2: begin reg_hek[191:128] <= shake_out_data; if (cmd_op == OP_KEYGEN) dk_ram[8'd198] <= shake_out_data; end
-                            3'd3: begin reg_hek[255:192] <= shake_out_data; if (cmd_op == OP_KEYGEN) dk_ram[8'd199] <= shake_out_data; end
+                            3'd0: begin reg_hek[ 63:  0] <= shake_out_data; if (op_r == OP_KEYGEN) dk_ram[8'd196] <= shake_out_data; end
+                            3'd1: begin reg_hek[127: 64] <= shake_out_data; if (op_r == OP_KEYGEN) dk_ram[8'd197] <= shake_out_data; end
+                            3'd2: begin reg_hek[191:128] <= shake_out_data; if (op_r == OP_KEYGEN) dk_ram[8'd198] <= shake_out_data; end
+                            3'd3: begin reg_hek[255:192] <= shake_out_data; if (op_r == OP_KEYGEN) dk_ram[8'd199] <= shake_out_data; end
                             default: ;
                         endcase
                         feed_cnt <= feed_cnt + 3'd1;
                         if (feed_cnt == 3'd3) begin
                             fsm_shake_out_ready <= 1'b0;
                             feed_cnt            <= 3'd0;
-                            if (cmd_op == OP_KEYGEN) state_r <= S_WRITE_Z;
+                            if (op_r == OP_KEYGEN) state_r <= S_WRITE_Z;
                             else state_r <= S_ENC_G_INIT;
                         end
                     end
@@ -1259,10 +1557,10 @@ module mlkem_top (
                     if (shake_in_ready) begin
                         fsm_shake_in_valid <= 1'b1;
                         case (feed_cnt)
-                            3'd0: begin fsm_shake_in_data <= seed_m[ 63:  0];  fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd1; end
-                            3'd1: begin fsm_shake_in_data <= seed_m[127: 64];  fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd2; end
-                            3'd2: begin fsm_shake_in_data <= seed_m[191:128];  fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd3; end
-                            3'd3: begin fsm_shake_in_data <= seed_m[255:192];  fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd4; end
+                            3'd0: begin fsm_shake_in_data <= m_reg[ 63:  0];  fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd1; end
+                            3'd1: begin fsm_shake_in_data <= m_reg[127: 64];  fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd2; end
+                            3'd2: begin fsm_shake_in_data <= m_reg[191:128];  fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd3; end
+                            3'd3: begin fsm_shake_in_data <= m_reg[255:192];  fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd4; end
                             3'd4: begin fsm_shake_in_data <= reg_hek[ 63:  0]; fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd5; end
                             3'd5: begin fsm_shake_in_data <= reg_hek[127: 64]; fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd6; end
                             3'd6: begin fsm_shake_in_data <= reg_hek[191:128]; fsm_shake_in_bytes <= 4'd8; fsm_shake_in_last <= 1'b0; feed_cnt <= 3'd7; end
@@ -1637,7 +1935,13 @@ module mlkem_top (
                     enc4_start_poly  <= 1'b0;
 
                     if (enc_c_word_valid) begin
-                        c_ram[c_ram_wr_addr] <= enc_c_word_data;
+                        if (is_decaps) begin
+                            // Decaps: compare re-encrypted word against stored c (no early exit)
+                            c_match   <= c_match & (c_ram[c_ram_wr_addr] == enc_c_word_data);
+                            c_cmp_cnt <= c_cmp_cnt + 8'd1;
+                        end else begin
+                            c_ram[c_ram_wr_addr] <= enc_c_word_data;
+                        end
                         c_ram_wr_addr        <= c_ram_wr_addr + 7'd1;
                         words_written_r      <= words_written_r + 8'd1;
                     end
@@ -1655,12 +1959,22 @@ module mlkem_top (
                 S_ENC_C_DRAIN: begin
                     enc_read_valid <= 1'b0;
                     if (enc_c_word_valid) begin
-                        c_ram[c_ram_wr_addr] <= enc_c_word_data;
+                        if (is_decaps) begin
+                            // Decaps: compare re-encrypted word against stored c (no early exit)
+                            c_match   <= c_match & (c_ram[c_ram_wr_addr] == enc_c_word_data);
+                            c_cmp_cnt <= c_cmp_cnt + 8'd1;
+                        end else begin
+                            c_ram[c_ram_wr_addr] <= enc_c_word_data;
+                        end
                         c_ram_wr_addr        <= c_ram_wr_addr + 7'd1;
                         words_written_r      <= words_written_r + 8'd1;
                         if ((current_poly < 3'd2 && words_written_r == 8'd39) || (current_poly == 3'd2 && words_written_r == 8'd15)) begin
                             if (current_poly == 3'd2) begin
-                                kem_shared_secret <= reg_k;
+                                // Decaps: select K' only if all 96 words matched, else decoy J(z||c).
+                                // Same cycle, same shape either way.
+                                kem_shared_secret <= (!is_decaps) ? reg_k :
+                                    ((c_match & (c_ram[c_ram_wr_addr] == enc_c_word_data) &
+                                      (c_cmp_cnt == 8'd95)) ? reg_k : reg_kbar);
                                 kem_done          <= 1'b1;
                                 state_r           <= S_IDLE;
                             end else begin
@@ -1671,6 +1985,245 @@ module mlkem_top (
                     end
                 end
 
+                // =============================================================
+                // Decapsulation (FIPS 203 Algorithm 18)
+                // =============================================================
+                // J(z || c) = SHAKE256(z || c, 32): z from dk_ram[200..203], c from c_ram
+                S_DEC_J_INIT: begin
+                    shake_init          <= 1'b1;
+                    shake_mode          <= 2'b11; // SHAKE256
+                    shake_squeeze_words <= 10'd4;
+                    words_written_r     <= 8'd0;
+                    int_dk_rd_addr      <= 8'd200;
+                    int_c_rd_addr       <= 7'd0;
+                    fsm_shake_in_valid  <= 1'b0;
+                    state_r             <= S_DEC_J_PREFETCH;
+                end
+
+                S_DEC_J_PREFETCH: begin
+                    int_dk_rd_addr     <= 8'd201;
+                    fsm_shake_in_valid <= 1'b1;
+                    state_r            <= S_DEC_J_FEED;
+                end
+
+                S_DEC_J_FEED: begin
+                    if (shake_in_ready) begin
+                        words_written_r <= words_written_r + 8'd1;
+                        int_dk_rd_addr  <= 8'd202 + words_written_r;
+                        int_c_rd_addr   <= (words_written_r >= 8'd3) ? (words_written_r[6:0] - 7'd2) : 7'd0;
+                        if (words_written_r == 8'd99) begin
+                            fsm_shake_in_valid  <= 1'b0;
+                            fsm_shake_out_ready <= 1'b1;
+                            feed_cnt            <= 3'd0;
+                            state_r             <= S_DEC_J_SQUEEZE;
+                        end
+                    end
+                end
+
+                S_DEC_J_SQUEEZE: begin
+                    fsm_shake_in_valid  <= 1'b0;
+                    fsm_shake_out_ready <= 1'b1;
+                    if (shake_out_valid && fsm_shake_out_ready) begin
+                        case (feed_cnt)
+                            3'd0: reg_kbar[ 63:  0] <= shake_out_data;
+                            3'd1: reg_kbar[127: 64] <= shake_out_data;
+                            3'd2: reg_kbar[191:128] <= shake_out_data;
+                            3'd3: reg_kbar[255:192] <= shake_out_data;
+                            default: ;
+                        endcase
+                        feed_cnt <= feed_cnt + 3'd1;
+                        if (feed_cnt == 3'd3) begin
+                            fsm_shake_out_ready <= 1'b0;
+                            feed_cnt            <= 3'd0;
+                            lp_step             <= 3'd0;
+                            state_r             <= S_LP_SETUP;
+                        end
+                    end
+                end
+
+                // Generic polynomial loader: step 0/1 u'[0/1] (c words 0..39 / 40..79, D=10),
+                // step 2 v' (c words 80..95, D=4), step 3/4 s_hat[0/1] (dk words 0..47 / 48..95, D=12)
+                S_LP_SETUP: begin
+                    lp_in_valid       <= 1'b0;
+                    lp_wr_idx         <= 8'd0;
+                    words_written_r   <= 8'd0;
+                    dec_check_modulus <= 1'b0;
+                    case (lp_step)
+                        3'd0: begin lp_src_c <= 1'b1; lp_mode <= 2'd1; lp_addr0 <= 8'd0;  lp_nwords <= 6'd40; lp_bank <= 3'd0; lp_start10 <= 1'b1; int_dk_rd_addr <= 8'd0;  int_c_rd_addr <= 7'd0;  end
+                        3'd1: begin lp_src_c <= 1'b1; lp_mode <= 2'd1; lp_addr0 <= 8'd40; lp_nwords <= 6'd40; lp_bank <= 3'd1; lp_start10 <= 1'b1; int_dk_rd_addr <= 8'd40; int_c_rd_addr <= 7'd40; end
+                        3'd2: begin lp_src_c <= 1'b1; lp_mode <= 2'd2; lp_addr0 <= 8'd80; lp_nwords <= 6'd16; lp_bank <= 3'd4; lp_start4  <= 1'b1; int_dk_rd_addr <= 8'd80; int_c_rd_addr <= 7'd80; end
+                        3'd3: begin lp_src_c <= 1'b0; lp_mode <= 2'd0; lp_addr0 <= 8'd0;  lp_nwords <= 6'd48; lp_bank <= 3'd2; dec_start_poly <= 1'b1; int_dk_rd_addr <= 8'd0;  int_c_rd_addr <= 7'd0;  end
+                        default: begin lp_src_c <= 1'b0; lp_mode <= 2'd0; lp_addr0 <= 8'd48; lp_nwords <= 6'd48; lp_bank <= 3'd3; dec_start_poly <= 1'b1; int_dk_rd_addr <= 8'd48; int_c_rd_addr <= 7'd48; end
+                    endcase
+                    state_r <= S_LP_PREFETCH;
+                end
+
+                S_LP_PREFETCH: begin
+                    int_dk_rd_addr <= lp_addr0 + 8'd1;
+                    int_c_rd_addr  <= lp_addr0[6:0] + 7'd1;
+                    lp_in_valid    <= 1'b1;
+                    state_r        <= S_LP_FEED;
+                end
+
+                S_LP_FEED: begin
+                    if (lp_in_valid && lp_sel_ready) begin
+                        words_written_r <= words_written_r + 8'd1;
+                        if ((words_written_r + 8'd1) < {2'd0, lp_nwords}) begin
+                            int_dk_rd_addr <= int_dk_rd_addr + 8'd1;
+                            int_c_rd_addr  <= int_c_rd_addr + 7'd1;
+                        end else begin
+                            lp_in_valid <= 1'b0;
+                        end
+                    end
+                    if (lp_fin_valid) begin
+                        lp_wr_idx <= lp_wr_idx + 8'd1;
+                        if (lp_wr_idx == 8'd255) begin
+                            lp_in_valid <= 1'b0;
+                            lp_step     <= lp_step + 3'd1;
+                            if (lp_step == 3'd4) begin
+                                lp_src_c     <= 1'b0;
+                                current_poly <= 3'd0;
+                                state_r      <= S_DC_NTT_START;
+                            end else begin
+                                state_r <= S_LP_SETUP;
+                            end
+                        end
+                    end
+                end
+
+                // NTT(u'[0]), NTT(u'[1]) in banks 0,1
+                S_DC_NTT_START: begin
+                    ntt_start       <= 1'b1;
+                    ntt_mode        <= 1'b0;
+                    ntt_target_bank <= current_poly;
+                    state_r         <= S_DC_NTT_WAIT;
+                end
+
+                S_DC_NTT_WAIT: begin
+                    if (ntt_done) begin
+                        if (current_poly == 3'd1) begin
+                            mat_col <= 2'd0;
+                            state_r <= S_DC_MUL_START;
+                        end else begin
+                            current_poly <= current_poly + 3'd1;
+                            state_r      <= S_DC_NTT_START;
+                        end
+                    end
+                end
+
+                // dot = s_hat[0]*u_hat[0] + s_hat[1]*u_hat[1]  -> bank 5
+                S_DC_MUL_START: begin
+                    mul_start     <= 1'b1;
+                    mul_op_a_bank <= 3'd2 + {1'b0, mat_col};
+                    mul_op_b_bank <= {1'b0, mat_col};
+                    mul_dest_bank <= 3'd5;
+                    if (mat_col == 2'd0) begin
+                        mul_accumulate <= 1'b0;
+                    end else begin
+                        mul_accumulate <= 1'b1;
+                        mul_acc_bank   <= 3'd5;
+                    end
+                    state_r <= S_DC_MUL_WAIT;
+                end
+
+                S_DC_MUL_WAIT: begin
+                    if (mul_done) begin
+                        if (mat_col == 2'd0) begin
+                            mat_col <= 2'd1;
+                            state_r <= S_DC_MUL_START;
+                        end else begin
+                            ntt_start       <= 1'b1;
+                            ntt_mode        <= 1'b1; // INTT
+                            ntt_target_bank <= 3'd5;
+                            state_r         <= S_DC_INTT_WAIT;
+                        end
+                    end
+                end
+
+                S_DC_INTT_WAIT: begin
+                    if (ntt_done) state_r <= S_DC_SUB_START;
+                end
+
+                // w = v' - INTT(dot)  -> bank 6
+                S_DC_SUB_START: begin
+                    add_start     <= 1'b1;
+                    add_mode      <= 2'b01; // MODE_SUB
+                    add_dest_bank <= 3'd6;
+                    add_op_a_bank <= 3'd4;
+                    add_op_b_bank <= 3'd5;
+                    add_op_c_bank <= 3'd0;
+                    state_r       <= S_DC_SUB_WAIT;
+                end
+
+                S_DC_SUB_WAIT: begin
+                    if (add_done) state_r <= S_DC_M_START;
+                end
+
+                // m' = ByteEncode1(Compress1(w)) -> m_reg
+                S_DC_M_START: begin
+                    enc_coeff_idx   <= 8'd0;
+                    enc_coeff_cnt   <= 9'd0;
+                    enc_read_valid  <= 1'b0;
+                    words_written_r <= 8'd0;
+                    enc_bank        <= 3'd6;
+                    enc1_start_poly <= 1'b1;
+                    state_r         <= S_DC_M_STREAM;
+                end
+
+                S_DC_M_STREAM: begin
+                    if (enc1_out_valid) begin
+                        m_reg[{words_written_r[1:0], 6'd0} +: 64] <= enc1_out_data;
+                        words_written_r <= words_written_r + 8'd1;
+                    end
+                    if (enc_coeff_cnt < 9'd256) begin
+                        enc_coeff_idx  <= enc_coeff_idx + 8'd1;
+                        enc_coeff_cnt  <= enc_coeff_cnt + 9'd1;
+                        enc_read_valid <= 1'b1;
+                    end else begin
+                        enc_read_valid <= 1'b0;
+                        state_r        <= S_DC_M_DRAIN;
+                    end
+                end
+
+                S_DC_M_DRAIN: begin
+                    enc_read_valid <= 1'b0;
+                    if (enc1_out_valid) begin
+                        m_reg[{words_written_r[1:0], 6'd0} +: 64] <= enc1_out_data;
+                        words_written_r <= words_written_r + 8'd1;
+                        if (words_written_r == 8'd3) begin
+                            // Re-encrypt: validate/decode ek from dk_ram[96..191], then reuse Encaps path
+                            dec_start_poly    <= 1'b1;
+                            dec_check_modulus <= 1'b1;
+                            dec_target_bank   <= 3'd0;
+                            dec_coeff_idx     <= 8'd0;
+                            int_dk_rd_addr    <= 8'd96;
+                            words_written_r   <= 8'd0;
+                            state_r           <= S_ENC_DEC_PREFETCH;
+                        end
+                    end
+                end
+
+                // Encaps start after an ingested ek: needs a fresh seed (already captured, or wait).
+                S_ING_ENC_GO: begin
+                    if (m_have || (rng_valid && !rng_lock)) begin
+                        if (!m_have) begin
+                            m_reg    <= rng_data;
+                            rng_take <= 1'b1;
+                            rng_lock <= 1'b1;
+                        end
+                        m_have            <= 1'b0;
+                        op_r              <= OP_ENCAPS;
+                        is_decaps         <= 1'b0;
+                        dec_start_poly    <= 1'b1;
+                        dec_check_modulus <= 1'b1;
+                        dec_target_bank   <= 3'd0;
+                        dec_coeff_idx     <= 8'd0;
+                        int_dk_rd_addr    <= 8'd96;
+                        words_written_r   <= 8'd0;
+                        state_r           <= S_ENC_DEC_PREFETCH;
+                    end
+                end
+
                 default: state_r <= S_IDLE;
             endcase
         end
@@ -1678,16 +2231,16 @@ module mlkem_top (
 
     // Unused signal tie-offs for lint compliance
     wire _unused_ok = &{1'b0,
-        OP_DECAPS,
-        packet_bus_sof, packet_bus_packet_type, packet_bus_payload_len, packet_bus_session_id,
+        OP_DECAPS, dec10_out_data[11:10], dec4_out_data[11:4],
         sntt_err_truncated, sntt_poly_mem_addr[10:8],
         cbd_err_truncated, cbd_poly_mem_addr[10:8],
         enc_overflow, enc_poly_last, enc_busy,
         enc10_overflow, enc10_poly_last, enc10_busy,
         enc4_overflow, enc4_poly_last, enc4_busy,
         dec_busy,
-        decomp10_out_valid, decomp10_out_data,
-        packer_in_ready, packer_out_valid, packer_out_last, packer_out_bytes, packer_out_data,
+        dec10_busy, dec10_err, dec4_busy, dec4_err,
+        enc1_busy, enc1_overflow, enc1_poly_last,
+        packer_in_ready, packer_out_bytes,
         shake_out_mask, shake_busy
     };
 
