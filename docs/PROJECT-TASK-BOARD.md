@@ -83,6 +83,8 @@ Two consequences:
    the reply is 816 bytes starting with its own length — but one process has to
    demultiplex them.
 
+> **Decided 11 Oct (see `docs/DEMO-PLAN.md`):** D1 second UART + arbiter, D4 keep OLED, D2 separate scripts - which together require a third UART link for telemetry. The table below is the original option list.
+
 ### The decisions to make
 
 | # | Decision | Options | My recommendation |
