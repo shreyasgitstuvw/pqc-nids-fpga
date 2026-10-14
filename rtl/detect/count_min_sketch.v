@@ -77,6 +77,36 @@ reg [11:0] clear_addr;
 reg        clearing;
 reg [15:0] epoch_pkt_count;
 
+// ---------------------------------------------------------------------------
+// Epoch boundary handling
+//
+// Two defects were fixed here.
+//
+// 1. The clear used to begin on the same cycle the epoch counter filled, and
+//    the `clearing` branch outranks the update branch, so the two or three
+//    packets already in the 4-stage pipeline had their writebacks silently
+//    discarded while their verdicts still fired -- measured as three
+//    consecutive verdicts reporting the same count with the memory left one
+//    short. clear_req now defers the clear until the pipeline has drained.
+//
+// 2. During the 2048-cycle sweep no verdict was emitted at all. `ready` is
+//    connected to nothing (the contract's packet bus has no backpressure), so
+//    packets kept arriving, and drop_engine requires the CMS lane to report
+//    before it will commit ANY packet type -- so every packet presented in that
+//    window went unadjudicated. Those packets are now bypassed with an explicit
+//    pass verdict, queued in bypass_cnt so a bypass can never collide with a
+//    real verdict in the same cycle.
+//
+// What is deliberately NOT fixed: packets bypassed during the sweep are not
+// counted. Double-buffering the counters would avoid that, at 2x the BRAM. It
+// is not worth it here: the link is UART-bound at 3 Mbaud, so 2048 cycles is
+// about six byte-times -- less than one packet -- and a sustained flood is
+// caught in the following epoch regardless. At one byte per cycle it would be
+// 5.9% of packets, so revisit this if the ingress is ever widened.
+// ---------------------------------------------------------------------------
+reg        clear_req;      // epoch full, waiting for the pipeline to drain
+reg [11:0] bypass_cnt;     // packets admitted to neither the sketch nor a verdict
+
 // ============================================================================
 // SECTION 3: Hash Calculation Stage & Address Pipeline
 // ============================================================================
@@ -84,10 +114,17 @@ wire        hash_out_valid;
 wire [10:0] flow_hash_0, flow_hash_1, flow_hash_2, flow_hash_3;
 wire [9:0]  host_hash_0, host_hash_1, host_hash_2, host_hash_3;
 
+// A packet enters the sketch only when the sketch is fully live.
+wire admit     = header_valid && ready && !clearing && !clear_req;
+// ...otherwise it is bypassed and gets an explicit pass verdict.
+wire bypass    = header_valid && !admit;
+// True while any of the four pipeline stages still holds a packet.
+wire pipe_busy = hash_out_valid || pipe_rd_en || pipe_upd_en;
+
 hash_functions u_hash (
     .clk        (clk),
     .rst        (rst),
-    .in_valid   (header_valid && ready && !clearing),
+    .in_valid   (admit),
     .src_ip     (src_ip),
     .dst_port   (dst_port),
     .out_valid  (hash_out_valid),
@@ -211,6 +248,7 @@ wire [15:0] nxt_host_3 = (cur_host_3 == 16'hFFFF) ? 16'hFFFF : (cur_host_3 + 16'
 always @(posedge clk) begin
     if (rst) begin
         clearing         <= 1'b1;
+        clear_req        <= 1'b0;
         clear_addr       <= 12'd0;
         ready            <= 1'b0;
         epoch_pkt_count  <= 16'd0;
@@ -231,6 +269,11 @@ always @(posedge clk) begin
         fwd_host_val_1   <= 16'd0;
         fwd_host_val_2   <= 16'd0;
         fwd_host_val_3   <= 16'd0;
+    end else if (clear_req && !clearing && !pipe_busy) begin
+        // Pipeline drained: now it is safe to sweep.
+        clearing   <= 1'b1;
+        clear_addr <= 12'd0;
+        fwd_valid  <= 1'b0;
     end else if (clearing) begin
         flow_mem_0[clear_addr[10:0]] <= 16'd0;
         flow_mem_1[clear_addr[10:0]] <= 16'd0;
@@ -244,6 +287,7 @@ always @(posedge clk) begin
         end
         if (clear_addr == 12'd2047) begin
             clearing   <= 1'b0;
+            clear_req  <= 1'b0;
             clear_addr <= 12'd0;
             ready      <= 1'b1;
         end else begin
@@ -281,11 +325,11 @@ always @(posedge clk) begin
         fwd_host_val_2 <= nxt_host_2;
         fwd_host_val_3 <= nxt_host_3;
 
-        // Epoch packet counter tracking
+        // Epoch packet counter tracking. Request the clear; it starts once the
+        // pipeline has drained, so no in-flight writeback is discarded.
         if (epoch_pkt_count >= (EPOCH_N - 16'd1)) begin
             epoch_pkt_count <= 16'd0;
-            clearing        <= 1'b1;
-            clear_addr      <= 12'd0;
+            clear_req       <= 1'b1;
             ready           <= 1'b0;
         end else begin
             epoch_pkt_count <= epoch_pkt_count + 16'd1;
@@ -316,7 +360,24 @@ wire [3:0] comb_reason = is_flood ? `RC_FLOOD :
                          is_scan  ? `RC_SCAN  :
                                     `RC_NONE;
 
-// Synchronous Output Registering with 1-Cycle Strobe
+// Synchronous Output Registering with 1-Cycle Strobe.
+// A real verdict always wins the cycle; bypassed packets queue in bypass_cnt
+// and are drained one per idle cycle, so every packet gets exactly one strobe.
+// A bypass verdict is emitted on any cycle a real verdict is not using the
+// output register. `bypass` on the same cycle is served directly rather than
+// queued, so the counter only ever holds verdicts that had to wait.
+wire emit_bypass = !pipe_upd_en && ((bypass_cnt != 12'd0) || bypass);
+
+always @(posedge clk) begin
+    if (rst) begin
+        bypass_cnt <= 12'd0;
+    end else if (bypass && !emit_bypass) begin
+        bypass_cnt <= bypass_cnt + 12'd1;   // real verdict has the cycle: queue
+    end else if (!bypass && emit_bypass) begin
+        bypass_cnt <= bypass_cnt - 12'd1;   // drained one from the queue
+    end
+end
+
 always @(posedge clk) begin
     if (rst) begin
         verdict_valid  <= 1'b0;
@@ -330,6 +391,13 @@ always @(posedge clk) begin
         verdict_reason <= comb_reason;
         c_flow_out     <= calc_min_flow;
         c_host_out     <= calc_min_host;
+    end else if (emit_bypass) begin
+        // Bypassed at the epoch boundary: not counted, so it cannot be a flood.
+        verdict_valid  <= 1'b1;
+        verdict_fail   <= 1'b0;
+        verdict_reason <= `RC_NONE;
+        c_flow_out     <= 16'd0;
+        c_host_out     <= 16'd0;
     end else begin
         verdict_valid  <= 1'b0;
         verdict_fail   <= 1'b0;

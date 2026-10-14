@@ -1,7 +1,7 @@
 # Interface Contract
 ## pqc-nids-fpga — Frozen Cross-Module Interfaces
 
-**Status:** FROZEN — v1.1.0 (17 Sep 2026)
+**Status:** FROZEN — v1.1.1 (11 Oct 2026)
 **Owner:** Member A (contract authority). All sections confirmed and locked.
 
 > **Amendment v1.1.0 — read this before resuming work.** §3 and §6 previously had
@@ -12,6 +12,13 @@
 > plaintext stream from `chacha_poly` instead (new §3.1). Nothing else in the detection
 > lane changes: `protocol_validator.v` and `count_min_sketch.v` read header fields only and
 > remain fully parallel to the crypto lane. See the changelog at the end of this document.
+> **Amendment v1.1.1 — integration clarifications.** Three fields this document
+> left under-specified turned out to be unimplementable or implemented
+> inconsistently once the lanes were wired together. Each is now pinned down,
+> with the mechanism and the measured failure recorded: `session_id` (§3), the
+> AEAD associated data (§3.1), `l4_length` (§3), and the handshake verdict's
+> timing (§6). See the changelog.
+
 **Change Policy:** Any proposed changes to this file must be posted as a diff and approved by Member A. Changes require explicit notification of all affected members whose modules read the changed section (see "Consumers" lines).
 
 ---
@@ -83,14 +90,34 @@ packet_bus_t {
     l4_src_port      : 16 bits  // TCP/UDP source port
     l4_dst_port      : 16 bits  // TCP/UDP destination port
     tcp_flags        : 8 bits   // meaningful when ip_protocol == TCP; 8'h00 for UDP
-    l4_length        : 16 bits  // TCP data offset or UDP header length
+    l4_length        : 16 bits  // L4 HEADER length in bytes: TCP data offset x 4, UDP always 8
 
     // --- Project-specific classification fields ---
     payload_len      : 16 bits  // length of the payload in bytes after stripping headers
-    session_id       : 16 bits  // matched session ID from lookup; 0 = unassigned
+    session_id       : 16 bits  // from session_lookup.v; 1..3 usable, 0 = unassigned
     packet_type      : 2 bits   // packet type classification (see §4)
 }
 ```
+
+**`session_id` — who produces it (clarified v1.1.1).** §5 gives Member D the
+register file that *holds* sessions, but nothing owned the function that
+*assigns* an id to an arriving packet, so `parser.v` drove 0 for every packet and
+`session_mgr.v` rejected 0 as out of range. Measured: no session could ever reach
+ESTABLISHED, so no key was stored, no data packet could be decrypted, and
+`cam_matcher.v` never saw a plaintext byte. `rtl/control/session_lookup.v` now
+owns this field: a 3-entry table keyed on `ip_src_addr`, giving ids 1..3.
+Handshake packets claim a slot, DATA packets look up, and a miss returns 0.
+`parser.v`'s own `session_id` output is a stub and is left unconnected.
+
+**`l4_length` — exact meaning (clarified v1.1.1).** This is the L4 **header**
+length in bytes for both protocols: TCP data offset x 4 (20 minimum), and
+always 8 for UDP. The earlier wording "TCP data offset or UDP header length"
+was read two ways. `parser.v` published the raw UDP Length field, which includes
+the payload, while `protocol_validator.v` checks
+`ip_total_length == 20 + l4_length + payload_len`; the payload was therefore
+counted twice and **every UDP packet carrying a payload was rejected as
+`RC_MALFORMED`** (measured). The parser now converts, and keeps the raw UDP
+Length field internally for its own `< 8` check.
 
 **Header Constraints & Rejection Rules:**
 - **IPv4 Options:** Packets with `IHL > 5` (options present) are rejected as `RC_MALFORMED` (`4'h3`) by `protocol_validator.v`.
@@ -123,6 +150,33 @@ output reg       pt_tag_valid;  // 1-cycle strobe: pt_tag_ok is now meaningful (
 **Telemetry caveat.** `drop_engine.v` must **not** count a CAM hit on a tag-failed packet as a confirmed signature detection. A forged packet decrypts to noise; a coincidental match against that noise is not evidence of a Log4Shell attempt, and counting it would corrupt the detection-accuracy figures the final report depends on. See §6.
 
 **Handshake packets.** On `packet_type == 2'b00` / `2'b10` there is no session key and no plaintext, so `cam_matcher.v` does not participate. Handshake traffic remains covered by `crc32.v`, `protocol_validator.v`, and `count_min_sketch.v` — a handshake flood is a volumetric attack and must still be caught.
+
+### Associated data for the AEAD *(added v1.1.1)*
+
+`chacha_poly` requires `aad_data[127:0]` and `aad_len[4:0]`, and v1.1.0 defined
+neither, so the module could not be instantiated at all. The AAD is:
+
+```
+AAD = ip_src_addr(4) || ip_dst_addr(4) || l4_src_port(2) || l4_dst_port(2)
+```
+
+12 bytes, each field big-endian on the wire, byte 0 landing at `aad_data[7:0]`
+to match `chacha_poly`'s convention. `rtl/crypto/chacha_poly/aead_framer.v`
+builds it.
+
+These are exactly the header fields an attacker could rewrite to replay a
+validly-tagged ciphertext into a different session or host, so authenticating
+them binds the ciphertext to its 5-tuple. They are plaintext on the wire, so
+putting them in the AAD rather than the ciphertext costs nothing and leaves the
+detection lane's header reads (§3) unchanged. The port caps AAD at 16 bytes,
+which 12 fits with room to spare.
+
+**Tag delivery.** The 16-byte Poly1305 tag is the **last 16 bytes of the
+payload**, so on a streaming byte bus it is not known when `key_valid` is
+strobed. `aead_framer.v` uses `payload_len` to split the payload at
+`payload_len - 16`, streams the ciphertext, and fills `expected_tag` from the
+tail. `chacha_poly` tracks `expected_tag` continuously rather than latching it at
+`key_valid`, which used to capture zeros and fail every valid packet.
 
 **Consumers:** Member B (`cam_matcher.v`), Member D (`chacha_poly` drives these ports; `drop_engine.v` qualifies the verdict).
 
@@ -216,6 +270,32 @@ verdict_t {
 | `RC_BAD_TAG` | `4'h7` | Member D (`poly1305.v`) | Poly1305 MAC tag mismatch (deliberate data tampering) |
 | `RC_HANDSHAKE_KEY_INVALID` | `4'h8` | Member C (`mlkem_top.v`) | Structural key validation failure (FIPS 203 §7.2/§7.3, length) |
 | `4'h9`–`4'hF` | — | Reserved | Reserved for future expansion (assigned by Member A) |
+
+
+### Handshake verdict timing *(clarified v1.1.1)*
+
+`mlkem_top.v` reports 17,658 to 33,814 cycles after the header (measured; see
+`docs/Member C/Member-C-KEM-Cycle-Counts.md`), while a packet's window in
+`drop_engine.v` closes a few cycles after its header checks land. The handshake
+lane is therefore **not** part of the packet's expected-lane mask, and
+`RC_HANDSHAKE_KEY_INVALID` was unreachable: measured, an invalid handshake was
+counted as *passed* and the counter stayed at zero.
+
+A handshake failure is session-scoped rather than packet-scoped, so
+`drop_engine.v` now reports it out of band — its own `drop_valid` pulse with
+`RC_HANDSHAKE_KEY_INVALID`, held back while a packet window is open so the two
+never collide and the packet's own verdict always comes first.
+
+Two related guarantees were added at the same time, both of which were liveness
+bugs before:
+
+- **Watchdog.** `pkt_eof` arms a counter; if an expected lane never reports, the
+  packet is force-committed as a failure rather than leaving the window open
+  forever. Counted in `cnt_lane_timeout`.
+- **Stray verdicts.** A verdict arriving with no packet open used to be latched
+  and charged to whichever packet started next, dropping a clean packet and
+  leaving the real one unadjudicated. Such verdicts are now discarded and
+  counted in `cnt_stray_verdict`.
 
 ---
 

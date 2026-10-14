@@ -57,9 +57,19 @@ class EngineModel:
     def packet(self, ptype, events):
         """
         events: list of (cycle, lane, fail, reason), cycle >= 0 (0 = the sof
-        cycle).  Returns (fail, reason) and updates counters.
+        cycle).  Returns the LIST of (fail, reason) drops the engine emits and
+        updates counters.
+
+        The handshake KEM verdict is NOT part of the packet window. mlkem_top
+        reports 17,658 to 33,814 clocks after the header, long after the window
+        closes, so a KEM failure is reported on its own afterwards. Inside the
+        window it was unreachable and an invalid handshake counted as passed.
         """
         reported, flags = set(), set()
+        # A KEM failure is reported whenever it arrives, which in the real
+        # design is tens of thousands of cycles after the packet closed. So it
+        # is scanned across every event, not only those before the commit.
+        kem_fail = any(ln == "kem" and f for (_c, ln, f, _r) in events)
         if ptype == RESERVED:
             flags.add("proto")
         done = None
@@ -71,8 +81,7 @@ class EngineModel:
                     if fail:
                         flags.add("deframe")
                 elif lane == "kem":
-                    if fail:
-                        flags.add("kem")
+                    pass        # handled out of band, see above
                 else:
                     reported.add(lane)
                     if fail:
@@ -86,12 +95,18 @@ class EngineModel:
                 done = set(flags)
                 break
         assert done is not None, "model: packet never committed"
-        return self._commit(done)
+        drops = [self._commit(done)]
+        # A KEM failure anywhere in the packet produces its own later verdict.
+        if kem_fail:
+            drops.append((1, RC_KEY_INVALID))
+            self._inc("handshake_key_invalid")
+            self._inc("total_drops")
+        return drops
 
     def _commit(self, f):
         order = [("crc", RC_CRC), ("deframe", RC_TIMEOUT), ("proto", RC_MALFORMED),
                  ("poly", RC_BAD_TAG), ("cam", RC_SIG), ("flood", RC_FLOOD),
-                 ("scan", RC_SCAN), ("kem", RC_KEY_INVALID)]
+                 ("scan", RC_SCAN)]
         reason = RC_NONE
         for name, rc in order:
             if name in f:
@@ -188,7 +203,7 @@ def check(h, m, ptype, events, label):
     async def go():
         drops = await h.run_packet(ptype, events)
         exp = m.packet(ptype, events)
-        assert drops == [exp], f"{label}: RTL verdict {drops} != model {exp} (type={ptype} events={events})"
+        assert drops == exp, f"{label}: RTL verdicts {drops} != model {exp} (type={ptype} events={events})"
         got = h.counters()
         assert got == m.c, f"{label}: counters RTL {got} != model {m.c}"
     return go()
@@ -284,7 +299,7 @@ async def late_lane_delays_the_verdict(dut):
     drops = await h.run_packet(DATA, events, tail=3)
     assert drops == [(0, RC_NONE)], f"verdict {drops}"
     exp = m.packet(DATA, events)
-    assert exp == (0, RC_NONE) and h.counters() == m.c
+    assert exp == [(0, RC_NONE)] and h.counters() == m.c
 
 
 @cocotb.test()
@@ -326,6 +341,124 @@ async def counters_saturate(dut):
     assert m.c["total_drops"] == SAT and m.c["crc_fail"] == SAT
 
 
+
+# ==============================================================================
+# Regressions for the defects found in docs/INTEGRATION-READINESS-REVIEW.md.
+# Each of these failed before the fix and is kept so it cannot silently return.
+# ==============================================================================
+
+@cocotb.test()
+async def late_kem_verdict_is_reported(dut):
+    """mlkem_top reports 17,658-33,814 clocks after the header, so the KEM
+    verdict always lands after the packet window has closed. It used to be
+    unreachable: RC_HANDSHAKE_KEY_INVALID could never be emitted and an invalid
+    handshake was counted as passed."""
+    h = await start(dut)
+    d = dut
+    # a clean handshake packet: crc, proto, cms all pass
+    drops = await h.run_packet(HS_INIT, [ev(1, "crc"), ev(1, "proto"), ev(1, "cms")])
+    assert drops == [(0, RC_NONE)], f"packet verdict {drops}"
+    assert h.counters()["total_passed"] == 1
+
+    # KEM verdict arrives long afterwards, as it really does
+    h.drops.clear()
+    for _ in range(40):
+        await FallingEdge(d.clk)
+    d.v_kem_valid.value = 1
+    d.v_kem_fail.value = 1
+    d.v_kem_reason.value = RC_KEY_INVALID
+    await FallingEdge(d.clk)
+    d.v_kem_valid.value = 0
+    d.v_kem_fail.value = 0
+    for _ in range(6):
+        await FallingEdge(d.clk)
+    assert h.drops == [(1, RC_KEY_INVALID)], f"late KEM gave {h.drops}"
+    c = h.counters()
+    assert c["handshake_key_invalid"] == 1, "RC_HANDSHAKE_KEY_INVALID not counted"
+    assert c["total_drops"] == 1
+
+
+@cocotb.test()
+async def stray_verdict_is_not_charged_to_next_packet(dut):
+    """A verdict arriving with no packet open used to be latched and charged to
+    whichever packet started next, dropping a clean packet and leaving the real
+    one unadjudicated. It is now counted as a stray and discarded."""
+    h = await start(dut)
+    d = dut
+    d.v_poly_valid.value = 1
+    d.v_poly_fail.value = 1
+    d.v_poly_reason.value = RC_BAD_TAG
+    await FallingEdge(d.clk)
+    d.v_poly_valid.value = 0
+    d.v_poly_fail.value = 0
+    for _ in range(3):
+        await FallingEdge(d.clk)
+    assert h.drops == [], f"stray verdict produced a drop: {h.drops}"
+    assert int(d.cnt_stray_verdict.value) == 1, "stray not counted"
+
+    # the next packet must be unaffected
+    drops = await h.run_packet(DATA, [ev(1, ln) for ln in sorted(EXPECTED[DATA])])
+    assert drops == [(0, RC_NONE)], f"clean packet after a stray: {drops}"
+    assert int(d.cnt_bad_tag.value) == 0, "stray was charged to the next packet"
+
+
+@cocotb.test()
+async def watchdog_force_commits_a_missing_lane(dut):
+    """pkt_eof was an input but sunk unused, so a lane that never reported left
+    the packet open forever with no verdict. The watchdog now force-commits it
+    as a failure rather than forwarding something no detector cleared.
+
+    Built with WATCHDOG_CYCLES=64 (see test_runner); the shipped default is
+    65536, i.e. 0.66 ms at 100 MHz."""
+    h = await start(dut)
+    d = dut
+    d.pkt_type.value = DATA
+    d.pkt_sof.value = 1
+    await FallingEdge(d.clk)
+    d.pkt_sof.value = 0
+    # only crc reports; cam/cms/poly/proto never do
+    d.v_crc_valid.value = 1
+    await FallingEdge(d.clk)
+    d.v_crc_valid.value = 0
+    # end of payload arms the watchdog
+    d.pkt_eof.value = 1
+    await FallingEdge(d.clk)
+    d.pkt_eof.value = 0
+    for _ in range(90):
+        await FallingEdge(d.clk)
+    assert h.drops == [(1, RC_MALFORMED)], f"watchdog verdict {h.drops}"
+    assert int(d.cnt_lane_timeout.value) == 1, "lane timeout not counted"
+    assert int(d.cnt_total_passed.value) == 0, "a stalled packet was counted as passed"
+
+
+@cocotb.test()
+async def deframe_reason_is_honoured(dut):
+    """crc32.v has no verdict port, and deframer.v emits RC_CRC_FAIL,
+    RC_FRAME_TIMEOUT and RC_MALFORMED on one port. Deriving the code from which
+    port fired mislabelled every CRC failure as RC_FRAME_TIMEOUT."""
+    h = await start(dut)
+    d = dut
+    for code, counter in ((RC_CRC, "cnt_crc_fail"),
+                          (RC_MALFORMED, "cnt_malformed"),
+                          (RC_TIMEOUT, "cnt_frame_timeout")):
+        before = int(getattr(d, counter).value)
+        h.drops.clear()
+        d.pkt_type.value = DATA
+        d.pkt_sof.value = 1
+        await FallingEdge(d.clk)
+        d.pkt_sof.value = 0
+        d.v_deframe_valid.value = 1
+        d.v_deframe_fail.value = 1
+        d.v_deframe_reason.value = code
+        await FallingEdge(d.clk)
+        d.v_deframe_valid.value = 0
+        d.v_deframe_fail.value = 0
+        for _ in range(5):
+            await FallingEdge(d.clk)
+        assert h.drops == [(1, code)], f"code {code}: drops {h.drops}"
+        after = int(getattr(d, counter).value)
+        assert after == before + 1, f"code {code}: {counter} {before} -> {after}"
+
 def test_runner():
     """pytest / `python test_drop_engine.py` entry: build with iverilog and run."""
     from cocotb.runner import get_runner
@@ -333,6 +466,7 @@ def test_runner():
     rtl = REPO / "rtl"
     runner = get_runner(os.getenv("SIM", "icarus"))
     runner.build(
+        parameters={"WATCHDOG_CYCLES": 64},
         sources=[rtl / "control" / "drop_engine.v"],
         includes=[rtl / "control"],
         hdl_toplevel="drop_engine",

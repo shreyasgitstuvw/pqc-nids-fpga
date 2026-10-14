@@ -230,6 +230,128 @@ async def cms_reset_clears(dut):
     assert c_h == 1, f"Host counter after reset did not restart at 1: got {c_h}"
 
 
+
+# ==============================================================================
+# Regressions for the epoch-boundary defects found in
+# docs/INTEGRATION-READINESS-REVIEW.md.
+#
+# Both tests force the boundary by writing epoch_pkt_count directly rather than
+# sending 32768 packets. That is white-box, but the behaviour under test IS the
+# boundary, and lowering EPOCH_N for the whole build would break the flood and
+# scan tests above, which need hundreds of packets inside one epoch.
+# ==============================================================================
+
+@cocotb.test()
+async def cms_every_packet_gets_a_verdict_across_the_epoch(dut):
+    """During the 2048-cycle epoch sweep no verdict was emitted at all. `ready`
+    is wired to nothing and the contract's packet bus has no backpressure, so
+    packets kept arriving, and drop_engine requires the CMS lane to report
+    before it will commit ANY packet type -- every packet presented in that
+    window went unadjudicated. Measured before the fix: 4200 headers produced
+    33 verdicts."""
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    await reset_dut(dut)
+
+    presented = 0
+    verdicts = []
+
+    async def mon():
+        while True:
+            await FallingEdge(dut.clk)
+            if int(dut.verdict_valid.value):
+                verdicts.append((int(dut.verdict_fail.value),
+                                 int(dut.c_flow_out.value)))
+
+    task = cocotb.start_soon(mon())
+    # Park the epoch counter just below its limit so the next packet trips the
+    # boundary, then drive back-to-back headers straight through the sweep,
+    # ignoring `ready` exactly as the contract's bus does.
+    dut.epoch_pkt_count.value = int(dut.EPOCH_N.value) - 2
+    await FallingEdge(dut.clk)
+    for n in range(2600):
+        dut.src_ip.value = 0x0A000001
+        dut.dst_ip.value = 0x0A000002
+        dut.dst_port.value = 80
+        dut.protocol.value = 6
+        dut.eof.value = 1
+        dut.header_valid.value = 1
+        await FallingEdge(dut.clk)
+        presented += 1
+    dut.header_valid.value = 0
+    dut.eof.value = 0
+    for _ in range(40):
+        await FallingEdge(dut.clk)
+    task.kill()
+
+    assert len(verdicts) == presented, (
+        f"{presented} headers presented but only {len(verdicts)} verdicts emitted "
+        f"({presented - len(verdicts)} packets would stall drop_engine)")
+
+
+@cocotb.test()
+async def cms_no_stale_counts_at_the_epoch_boundary(dut):
+    """The clear used to begin on the same cycle the epoch counter filled, and
+    the clearing branch outranks the update branch, so packets already in the
+    4-stage pipeline lost their writeback while their verdicts still fired --
+    several consecutive verdicts reporting the same count. clear_req now defers
+    the sweep until the pipeline has drained, so a counted packet's count is
+    never discarded."""
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    await reset_dut(dut)
+
+    # One flow, one packet at a time so every count is observable, with the
+    # epoch boundary forced to land in the middle of the run.
+    seen = []
+    for n in range(12):
+        if n == 5:
+            dut.epoch_pkt_count.value = int(dut.EPOCH_N.value) - 2
+            await FallingEdge(dut.clk)
+        fail, reason, c_flow, c_host = await send_packet_header(dut, 0x0A000001, 80)
+        seen.append(c_flow)
+        # the sweep is 2048 clocks long (asserted in cms_epoch_sweep_length);
+        # wait it out so the next packet is counted
+        for _ in range(2100):
+            await FallingEdge(dut.clk)
+
+    # Counts must never repeat within a run of increasing values: a repeat is a
+    # discarded writeback. A drop back to a low value is a legitimate epoch reset.
+    for i in range(1, len(seen)):
+        if seen[i] > seen[i - 1]:
+            assert seen[i] == seen[i - 1] + 1, (
+                f"count jumped {seen[i-1]} -> {seen[i]} at packet {i}: {seen}")
+        elif seen[i] == seen[i - 1] and seen[i] != 0:
+            raise AssertionError(
+                f"count repeated at {seen[i]} (packet {i}), writeback discarded: {seen}")
+
+
+@cocotb.test()
+async def cms_epoch_sweep_length(dut):
+    """The epoch sweep clears 2048 addresses, one per clock, so `clearing` is
+    asserted for exactly 2048 cycles. That number appears in the module header
+    and in the trade-off argument for not double-buffering the counters, so it
+    is measured here rather than asserted from the source."""
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    await reset_dut(dut)
+
+    # Park the counter at EPOCH_N - 1 so this very next packet trips the
+    # boundary: the RTL compares epoch_pkt_count >= EPOCH_N - 1 on the update
+    # cycle, so EPOCH_N - 2 would only advance the counter.
+    dut.epoch_pkt_count.value = int(dut.EPOCH_N.value) - 1
+    await FallingEdge(dut.clk)
+    await send_packet_header(dut, 0x0A000001, 80)
+
+    for _ in range(200):
+        await FallingEdge(dut.clk)
+        if int(dut.clearing.value) == 1:
+            break
+    assert int(dut.clearing.value) == 1, "the sweep never started"
+
+    n = 0
+    while int(dut.clearing.value) == 1 and n < 5000:
+        await FallingEdge(dut.clk)
+        n += 1
+    assert n == 2048, f"clearing was asserted for {n} cycles, expected 2048"
+
 def test_runner():
     """pytest entry point using cocotb.runner and iverilog."""
     import os
