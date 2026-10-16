@@ -3,7 +3,9 @@
 //
 // THE synthesis target. Wires every lane into one design:
 //
-//   uart_rx -> deframer -> parser ----+--> session_lookup --> session_id
+//   uart_rx A (sender)   -+
+//                         +-> rx_arbiter -> deframer -> parser --+--> session_lookup --> session_id
+//   uart_rx B (attacker) -+
 //                                     |
 //                                     +--> protocol_validator ---+
 //                                     +--> count_min_sketch -----+
@@ -18,8 +20,8 @@
 //
 //   mlkem_top  -> session_mgr  (shared secret in)
 //   aead_framer <-> session_mgr (key/nonce out, nonce_adv in)
-//   mlkem_top  -> handshake_tx -> uart_tx (the 768-byte ciphertext reply)
-//   drop_engine -> led_driver, telemetry_tx -> uart_tx
+//   mlkem_top  -> handshake_tx -> uart_tx 0 (the 768-byte ciphertext reply, sender link)
+//   drop_engine -> led_driver, telemetry_tx -> uart_tx 1 (its own telemetry link)
 //
 // Before this file existed there was no top level at all: rtl/top/ held only a
 // .gitkeep, chacha_poly was instantiated nowhere, and the only multi-module
@@ -43,9 +45,16 @@
 //   A KeyGen runs once automatically after reset. Decaps needs this board's own
 //   decapsulation key, and nothing else would ever produce one.
 //
-//   The UART transmitter is shared. handshake_tx has absolute priority because
-//   the ciphertext reply is on the critical path of the handshake; telemetry
-//   frames fill the gaps.
+//   Three serial links, one Pmod USB-UART each, so the demo's sender, attacker
+//   and monitor are three genuinely separate devices:
+//     JA  sender    uart_rx_pin in, uart_tx_pin out (handshake ciphertext reply)
+//     JB  attacker  attacker_rx_pin in only
+//     JC  monitor   telem_tx_pin out only (telemetry frame every 250 ms)
+//   The two receive links are merged by rx_arbiter, a store-and-forward frame
+//   arbiter, because a UART cannot be paused and a byte-level lock would drop
+//   bytes under flood. Telemetry no longer shares a transmitter with the
+//   handshake reply, so the old hs_busy hold-off is gone; a frame dropped by a
+//   full arbiter buffer is OR-ed into the telemetry overflow bit, not hidden.
 //
 // Resource estimate: pre-synthesis, and deliberately not stated here. Every
 // such figure in this repository is an estimate until scripts/build_bitstream.tcl
@@ -59,12 +68,15 @@
 
 module pqc_nids_top #(
     parameter integer CLK_HZ    = 100_000_000,
-    parameter integer BAUD_RATE = 3_000_000
+    parameter integer BAUD_RATE = 3_000_000,
+    parameter integer TELEM_PERIOD_MS = 250      // demo_config.DISPLAY_REFRESH_S; 1 in simulation
 ) (
     input  wire       clk,          // 100 MHz, ZedBoard GCLK
     input  wire       btn_rst,      // active-high push button
-    input  wire       uart_rx_pin,  // Pmod USB-UART, data from host
-    output wire       uart_tx_pin,  // Pmod USB-UART, data to host
+    input  wire       uart_rx_pin,  // JA Pmod USB-UART, data from the sender
+    output wire       uart_tx_pin,  // JA Pmod USB-UART, handshake reply to the sender
+    input  wire       attacker_rx_pin, // JB Pmod USB-UART, data from the attacker
+    output wire       telem_tx_pin, // JC Pmod USB-UART, telemetry to the monitor
     output wire [7:0] led           // LD0..LD7
 );
 
@@ -89,13 +101,35 @@ module pqc_nids_top #(
     wire rst_i = rst | por_rst;
 
     // ------------------------------------------------------------- ingress
-    wire [7:0] rx_data;
+    wire [7:0] rx_data, rxb_data;
     wire       rx_valid, rx_busy, rx_frame_err;
+    wire       rxb_valid, rxb_busy, rxb_frame_err;
 
     uart_rx #(.CLK_FREQ(CLK_HZ), .BAUD_RATE(BAUD_RATE)) u_uart_rx (
         .clk(clk), .rst(rst_i), .rx_pin(uart_rx_pin),
         .rx_data(rx_data), .rx_valid(rx_valid), .rx_busy(rx_busy),
         .frame_err(rx_frame_err)
+    );
+
+    uart_rx #(.CLK_FREQ(CLK_HZ), .BAUD_RATE(BAUD_RATE)) u_uart_rx_b (
+        .clk(clk), .rst(rst_i), .rx_pin(attacker_rx_pin),
+        .rx_data(rxb_data), .rx_valid(rxb_valid), .rx_busy(rxb_busy),
+        .frame_err(rxb_frame_err)
+    );
+
+    // Merge the two links into the one byte stream deframer.v expects.
+    wire       arb_valid;
+    wire [7:0] arb_data;
+    wire [15:0] arb_drop_a, arb_drop_b, arb_fwd_a, arb_fwd_b;
+    wire       arb_drop_sticky;
+
+    rx_arbiter #(.CLK_HZ(CLK_HZ), .BAUD_RATE(BAUD_RATE)) u_rx_arb (
+        .clk(clk), .rst(rst_i),
+        .a_valid(rx_valid),  .a_data(rx_data),
+        .b_valid(rxb_valid), .b_data(rxb_data),
+        .out_valid(arb_valid), .out_data(arb_data),
+        .drop_a(arb_drop_a), .drop_b(arb_drop_b),
+        .fwd_a(arb_fwd_a), .fwd_b(arb_fwd_b), .drop_sticky(arb_drop_sticky)
     );
 
     wire       df_valid, df_sof, df_eof;
@@ -105,7 +139,7 @@ module pqc_nids_top #(
 
     deframer u_deframer (
         .clk(clk), .rst(rst_i),
-        .in_valid(rx_valid), .in_data(rx_data),
+        .in_valid(arb_valid), .in_data(arb_data),
         .out_valid(df_valid), .out_data(df_data),
         .out_sof(df_sof), .out_eof(df_eof),
         .verdict_valid(df_v_valid), .verdict_fail(df_v_fail),
@@ -186,7 +220,7 @@ module pqc_nids_top #(
 
     entropy_src u_entropy (
         .clk(clk), .rst(rst_i),
-        .jitter_strobe(rx_valid),
+        .jitter_strobe(rx_valid | rxb_valid),   // raw arrival times of both links
         .seed_load(1'b0), .seed_in(256'd0),
         .rng_valid(rng_valid), .rng_data(rng_data), .rng_take(rng_take)
     );
@@ -431,6 +465,7 @@ module pqc_nids_top #(
     wire       hs_tx_valid, tel_tx_valid, hs_busy;
     wire       tx_busy;
     wire       tx_done_unused;
+    wire       tel_tx_busy, tel_tx_done_unused;
 
     handshake_tx u_hs_tx (
         .clk(clk), .rst(rst_i),
@@ -442,7 +477,7 @@ module pqc_nids_top #(
         .busy(hs_busy)
     );
 
-    telemetry_tx #(.CLK_HZ(CLK_HZ)) u_tel (
+    telemetry_tx #(.CLK_HZ(CLK_HZ), .PERIOD_MS(TELEM_PERIOD_MS)) u_tel (
         .clk(clk), .rst(rst_i),
         .cnt_crc_fail(c_crc), .cnt_frame_timeout(c_to), .cnt_malformed(c_mal),
         .cnt_signature(c_sig), .cnt_flood(c_fl), .cnt_scan(c_sc),
@@ -450,20 +485,21 @@ module pqc_nids_top #(
         .cnt_total_drops(c_drops), .cnt_total_passed(c_passed),
         .cnt_lane_timeout(c_lto), .cnt_stray_verdict(c_stray),
         .session_established(any_session_up),
-        .fifo_overflow(fr_fifo_overflow), .kem_busy(kem_busy),
-        // Held off while the ciphertext reply is going out, so a telemetry byte
-        // can never be interleaved into the middle of a handshake frame.
-        .tx_data(tel_tx_data), .tx_valid(tel_tx_valid), .tx_busy(tx_busy | hs_busy)
+        .fifo_overflow(fr_fifo_overflow | arb_drop_sticky), .kem_busy(kem_busy),
+        // Own transmitter: nothing to hold off for.
+        .tx_data(tel_tx_data), .tx_valid(tel_tx_valid), .tx_busy(tel_tx_busy)
     );
-
-    // handshake_tx wins the transmitter outright.
-    wire [7:0] tx_mux_data  = hs_busy ? hs_tx_data  : tel_tx_data;
-    wire       tx_mux_valid = hs_busy ? hs_tx_valid : tel_tx_valid;
 
     uart_tx #(.CLK_FREQ(CLK_HZ), .BAUD_RATE(BAUD_RATE)) u_uart_tx (
         .clk(clk), .rst(rst_i),
-        .tx_data(tx_mux_data), .tx_valid(tx_mux_valid),
+        .tx_data(hs_tx_data), .tx_valid(hs_tx_valid),
         .tx_pin(uart_tx_pin), .tx_busy(tx_busy), .tx_done(tx_done_unused)
+    );
+
+    uart_tx #(.CLK_FREQ(CLK_HZ), .BAUD_RATE(BAUD_RATE)) u_uart_tx_tel (
+        .clk(clk), .rst(rst_i),
+        .tx_data(tel_tx_data), .tx_valid(tel_tx_valid),
+        .tx_pin(telem_tx_pin), .tx_busy(tel_tx_busy), .tx_done(tel_tx_done_unused)
     );
 
     // ---- signals observed only in simulation or reserved for the PS ----
@@ -472,6 +508,8 @@ module pqc_nids_top #(
                         sid_evicted, sm_lk_state, cp_busy, cp_tag_out, cp_tag_ok,
                         cms_ready, cms_c_flow, cms_c_host, cam_sig_id, cam_offset,
                         dk_ram_rdata, kem_pkt_dropped_busy, fr_no_session_drop,
-                        payload_len, tx_done_unused};
+                        payload_len, tx_done_unused, tel_tx_done_unused,
+                        rxb_busy, rxb_frame_err, arb_drop_a, arb_drop_b,
+                        arb_fwd_a, arb_fwd_b, hs_busy};
 
 endmodule

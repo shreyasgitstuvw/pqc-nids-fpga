@@ -1,6 +1,14 @@
 #==============================================================================
 # constraints/pqc_nids.xdc
 #
+# S1 STATUS (board in hand: ZedBoard Rev D, PB200-248, silkscreen read from photos)
+#   CONFIRMED against the board silkscreen: LD0..LD7 = T22 T21 U22 U21 V22 W22
+#     U19 U14; SW0 F22 .. SW7 M15; BTNU T18, BTNL N15, BTNR R18; Pmods JA-JD are
+#     PL headers, JE is PS MIO (do not use). VADJ jumper J18 is on 3V3.
+#   CONFIRMED against Digilent's Zedboard-Master.xdc: Y9 (GCLK), P16 (BTNC, bank 34,
+#     LVCMOS18), JA2 AA11, JA3 Y10, JB2 W11, JC2_P Y4. S1 is closed.
+#==============================================================================
+#
 # ZedBoard (XC7Z020-CLG484-1) pin and timing constraints for rtl/top/pqc_nids_top.v
 #
 # *** VERIFY EVERY PACKAGE_PIN AND IOSTANDARD BELOW AGAINST THE DIGILENT
@@ -65,3 +73,16 @@ set_false_path -to [get_ports {led[*]}]
 # constraint is needed to keep them out of LUTRAM. aead_framer.v's 512-byte
 # ciphertext FIFO is read combinationally and is therefore meant to be
 # distributed RAM.
+
+#------------------------------------------------------- three-link demo (JB, JC)
+# S1: pins confirmed against Digilent's Zedboard-Master.xdc (Rev D, bank 13, 3.3 V).
+# JA = sender (above). JB = attacker, JC = telemetry monitor. One Pmod USB-UART
+# each; module TXD (pin 2) -> FPGA input, module RXD (pin 3) <- FPGA output.
+#   JB2 = W11 (Pmod pin 2): attacker_rx_pin, input only.
+#   JC2_P = Y4 (Pmod pin 3): telem_tx_pin, output only.
+# JC pins are the differential-pair names in the master XDC: pin1 JC1_P AB7,
+# pin2 JC1_N AB6, pin3 JC2_P Y4, pin4 JC2_N AA4. Used here as plain single-ended IO.
+set_property -dict {PACKAGE_PIN W11 IOSTANDARD LVCMOS33} [get_ports attacker_rx_pin]
+set_property -dict {PACKAGE_PIN Y4  IOSTANDARD LVCMOS33} [get_ports telem_tx_pin]
+set_false_path -from [get_ports attacker_rx_pin]
+set_false_path -to   [get_ports telem_tx_pin]
