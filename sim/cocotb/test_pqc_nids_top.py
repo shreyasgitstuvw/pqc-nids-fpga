@@ -43,7 +43,7 @@ from model.chacha_poly import chacha20_poly1305_encrypt               # noqa: E4
 from model.pipeline import compute_crc32, PORT_HS_INIT, PORT_HS_RESP, PORT_DATA  # noqa: E402
 
 CLKS_PER_BIT = 10          # must match BAUD_RATE in test_runner
-RC_NONE, RC_SIGNATURE, RC_BAD_TAG = 0x0, 0x4, 0x7
+RC_NONE, RC_CRC_FAIL, RC_SIGNATURE, RC_BAD_TAG = 0x0, 0x1, 0x4, 0x7
 
 HOST_MAC = bytes.fromhex("001122334455")
 FPGA_MAC = bytes.fromhex("aabbccddeeff")
@@ -81,23 +81,24 @@ def wire_frame(eth_payload: bytes) -> bytes:
     return total.to_bytes(2, "big") + eth_payload + crc.to_bytes(4, "big")
 
 
-async def uart_send_byte(dut, b: int):
+async def uart_send_byte(dut, b: int, pin="uart_rx_pin"):
     """8N1, LSB first, one stop bit."""
-    dut.uart_rx_pin.value = 0                       # start
+    sig = getattr(dut, pin)
+    sig.value = 0                                   # start
     for _ in range(CLKS_PER_BIT):
         await RisingEdge(dut.clk)
     for i in range(8):
-        dut.uart_rx_pin.value = (b >> i) & 1
+        sig.value = (b >> i) & 1
         for _ in range(CLKS_PER_BIT):
             await RisingEdge(dut.clk)
-    dut.uart_rx_pin.value = 1                       # stop
+    sig.value = 1                                   # stop
     for _ in range(CLKS_PER_BIT):
         await RisingEdge(dut.clk)
 
 
-async def uart_send(dut, data: bytes):
+async def uart_send(dut, data: bytes, pin="uart_rx_pin"):
     for b in data:
-        await uart_send_byte(dut, b)
+        await uart_send_byte(dut, b, pin)
 
 
 def rd(sig, default=0):
@@ -118,9 +119,11 @@ class TxCapture:
 
     def __init__(self, dut):
         self.dut = dut
-        self.rx = bytearray()
+        self.rx = bytearray()          # handshake reply link (uart_tx_pin, JA)
+        self.tel = bytearray()         # telemetry link (telem_tx_pin, JC)
         self.verdicts = []
-        cocotb.start_soon(self._tx_mon())
+        cocotb.start_soon(self._tx_mon(dut.uart_tx_pin, self.rx))
+        cocotb.start_soon(self._tx_mon(dut.telem_tx_pin, self.tel))
         cocotb.start_soon(self._verdict_mon())
 
     async def _verdict_mon(self):
@@ -131,20 +134,20 @@ class TxCapture:
                 self.verdicts.append((rd(d.drop_fail),
                                       int(d.drop_reason.value)))
 
-    async def _tx_mon(self):
+    async def _tx_mon(self, pin, out):
         d = self.dut
         while True:
             # idle high; wait for a start bit. An unresolved pin counts as idle.
-            while rd(d.uart_tx_pin, 1) == 1:
+            while rd(pin, 1) == 1:
                 await RisingEdge(d.clk)
             for _ in range(CLKS_PER_BIT + CLKS_PER_BIT // 2):
                 await RisingEdge(d.clk)             # settle into bit 0
             val = 0
             for i in range(8):
-                val |= rd(d.uart_tx_pin, 1) << i
+                val |= rd(pin, 1) << i
                 for _ in range(CLKS_PER_BIT):
                     await RisingEdge(d.clk)
-            self.rx.append(val)
+            out.append(val)
 
 
 def find_frame(stream: bytes, want_len: int):
@@ -161,6 +164,7 @@ def find_frame(stream: bytes, want_len: int):
 
 async def reset_and_keygen(dut, cap):
     dut.uart_rx_pin.value = 1
+    dut.attacker_rx_pin.value = 1
     dut.btn_rst.value = 1
     for _ in range(20):
         await RisingEdge(dut.clk)
@@ -269,7 +273,42 @@ async def top_handshake_then_data(dut):
     v = await send_data(b"harmless payload", 2, corrupt_tag=True)
     assert v == (1, RC_BAD_TAG), f"tampered tag not caught: {v}"
 
-    dut._log.info("end-to-end: handshake, secret agreement, pass, signature, bad tag")
+    # ---- 7. the attacker link, concurrently with the sender --------------
+    # A corrupted-CRC frame on JB while a clean data packet goes in on JA. Both
+    # must be judged: the arbiter interleaves whole frames, it does not lose or
+    # merge either.
+    bad = bytearray(wire_frame(eth_ip_udp(b"attacker traffic", PORT_DATA)))
+    bad[-1] ^= 0xFF
+    nonce = (3).to_bytes(12, "little")
+    c, tag = chacha20_poly1305_encrypt(k_host, nonce, aad, b"GET /second HTTP/1.1\r\n\r\n")
+    good = wire_frame(eth_ip_udp(c + tag, PORT_DATA))
+    cap.verdicts.clear()
+    t_att = cocotb.start_soon(uart_send(dut, bytes(bad), pin="attacker_rx_pin"))
+    t_snd = cocotb.start_soon(uart_send(dut, good))
+    await t_att
+    await t_snd
+    for _ in range(80000):
+        await RisingEdge(dut.clk)
+        if len(cap.verdicts) >= 2:
+            break
+    got = sorted(cap.verdicts)
+    assert (0, RC_NONE) in got, f"sender frame lost while attacker was active: {got}"
+    assert (1, RC_CRC_FAIL) in got, f"attacker CRC fault not reported: {got}"
+    assert int(dut.u_rx_arb.drop_a.value) == 0 and int(dut.u_rx_arb.drop_b.value) == 0
+
+    # ---- 8. telemetry is on its own link, and the reply link carries none --
+    for _ in range(300_000):                   # TELEM_PERIOD_MS = 1 -> 100k clocks
+        await RisingEdge(dut.clk)
+        if b"\xa5\x5a" in bytes(cap.tel) and len(cap.tel) >= 52 + 2:
+            break
+    i = bytes(cap.tel).find(b"\xa5\x5a")
+    assert i >= 0 and len(cap.tel) >= i + 52, f"no telemetry frame on telem_tx_pin ({len(cap.tel)} bytes)"
+    frame = bytes(cap.tel[i:i + 52])
+    assert sum(frame) & 0xFF == 0, "telemetry frame does not sum to zero mod 256"
+    assert b"\xa5\x5a" not in bytes(cap.rx[816:]), "telemetry leaked onto the handshake link"
+
+    dut._log.info("end-to-end: handshake, secret agreement, pass, signature, bad tag, "
+                  "concurrent attacker link, separate telemetry link")
 
 
 # ==============================================================================
@@ -296,7 +335,7 @@ def test_runner(sim_build):
     runner = get_runner("icarus")
     runner.build(verilog_sources=sources, includes=includes,
                  hdl_toplevel="pqc_nids_top",
-                 parameters={"BAUD_RATE": 10_000_000},
+                 parameters={"BAUD_RATE": 10_000_000, "TELEM_PERIOD_MS": 1},
                  build_dir=os.path.join(proj, "sim", sim_build), always=True)
     runner.test(hdl_toplevel="pqc_nids_top", test_module="test_pqc_nids_top",
                 test_dir=os.path.join(proj, "sim", "cocotb"))
