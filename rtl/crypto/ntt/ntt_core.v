@@ -85,10 +85,13 @@ module ntt_core #(
     reg [11:0] scratch_b_wdata;
     reg [11:0] scratch_b_rdata;
 
+    // One write port per always block = true-dual-port BRAM template (a single
+    // block with two writers made Vivado build this as 3072 flip-flops + muxes).
     always @(posedge clk) begin
         if (scratch_a_we) scratch_mem[scratch_a_addr] <= scratch_a_wdata;
         scratch_a_rdata <= scratch_mem[scratch_a_addr];
-
+    end
+    always @(posedge clk) begin
         if (scratch_b_we) scratch_mem[scratch_b_addr] <= scratch_b_wdata;
         scratch_b_rdata <= scratch_mem[scratch_b_addr];
     end
