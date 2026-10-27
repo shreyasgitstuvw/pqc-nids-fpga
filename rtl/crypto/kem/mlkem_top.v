@@ -256,7 +256,15 @@ module mlkem_top (
     // -------------------------------------------------------------------------
     // Ciphertext Storage BRAM (96 words x 64 bits = 768 bytes)
     // -------------------------------------------------------------------------
-    reg [63:0] c_ram [0:95];
+    // c_ram / ek_ram: ONE registered write port each (requests below), async-read
+    // distributed RAM. Several write sites in the FSM used to make Vivado build these
+    // as flip-flop arrays behind a 76-way state mux (~100k LUTs). Write lands 1 cycle
+    // after the request; nothing reads a word in the cycle after it is written.
+    (* ram_style = "distributed" *) reg [63:0] c_ram [0:127];
+    reg         c_we_q;
+    reg  [6:0]  c_wa_q;
+    reg  [63:0] c_wd_q;
+    always @(posedge clk) if (c_we_q) c_ram[c_wa_q] <= c_wd_q;
     reg [6:0]  c_ram_wr_addr;
     reg [6:0]  int_c_rd_addr;
     wire [6:0] c_ram_addr = busy ? int_c_rd_addr : c_ram_rd_addr_ext;
@@ -312,7 +320,11 @@ module mlkem_top (
 
     // Encapsulation-key store (separate from dk_ram so a stored dk survives an Encaps).
     // While an Encaps runs, the dk_ram read port is served from ek_ram[addr-96].
-    reg  [63:0] ek_ram [0:99];
+    (* ram_style = "distributed" *) reg [63:0] ek_ram [0:127];
+    reg         ek_we_q;
+    reg  [6:0]  ek_wa_q;
+    reg  [63:0] ek_wd_q;
+    always @(posedge clk) if (ek_we_q) ek_ram[ek_wa_q] <= ek_wd_q;
     wire [7:0]  ek_rd_off = dk_ram_b_addr - 8'd96;
     wire        rd_from_ek = busy && (op_r == OP_ENCAPS);
     always @(posedge clk) begin
@@ -997,11 +1009,13 @@ module mlkem_top (
             lp_start10      <= 1'b0;
             lp_start4       <= 1'b0;
 
+            c_we_q  <= 1'b0;
+            ek_we_q <= 1'b0;
             if (!busy && c_ram_wr_en) begin
-                c_ram[c_ram_wr_addr_ext] <= c_ram_wr_data_ext;
+                c_we_q <= 1'b1; c_wa_q <= c_ram_wr_addr_ext; c_wd_q <= c_ram_wr_data_ext;
             end
             if (!busy && ek_ram_wr_en) begin
-                ek_ram[ek_ram_wr_addr_ext] <= ek_ram_wr_data_ext;
+                ek_we_q <= 1'b1; ek_wa_q <= ek_ram_wr_addr_ext; ek_wd_q <= ek_ram_wr_data_ext;
             end
             if (!busy && dk_ram_wr_en) begin
                 dk_ram[dk_ram_wr_addr_ext] <= dk_ram_wr_data_ext;
@@ -1058,8 +1072,11 @@ module mlkem_top (
                             kem_session_id <= ing_sid;
                             state_r        <= S_STRUCT_FAIL;
                         end else if (packer_out_valid) begin
-                            if (ing_hs_init) ek_ram[(ing_wcnt < 8'd100) ? ing_wcnt[6:0] : 7'd0] <= packer_out_data;
-                            else             c_ram[ing_wcnt[6:0]]     <= packer_out_data;
+                            if (ing_hs_init) begin
+                                ek_we_q <= 1'b1; ek_wa_q <= (ing_wcnt < 8'd100) ? ing_wcnt[6:0] : 7'd0; ek_wd_q <= packer_out_data;
+                            end else begin
+                                c_we_q <= 1'b1; c_wa_q <= ing_wcnt[6:0]; c_wd_q <= packer_out_data;
+                            end
                             ing_wcnt <= ing_wcnt + 8'd1;
                             if (packer_out_last) begin
                                 ing_active <= 1'b0;
@@ -1940,7 +1957,7 @@ module mlkem_top (
                             c_match   <= c_match & (c_ram[c_ram_wr_addr] == enc_c_word_data);
                             c_cmp_cnt <= c_cmp_cnt + 8'd1;
                         end else begin
-                            c_ram[c_ram_wr_addr] <= enc_c_word_data;
+                            c_we_q <= 1'b1; c_wa_q <= c_ram_wr_addr; c_wd_q <= enc_c_word_data;
                         end
                         c_ram_wr_addr        <= c_ram_wr_addr + 7'd1;
                         words_written_r      <= words_written_r + 8'd1;
@@ -1964,7 +1981,7 @@ module mlkem_top (
                             c_match   <= c_match & (c_ram[c_ram_wr_addr] == enc_c_word_data);
                             c_cmp_cnt <= c_cmp_cnt + 8'd1;
                         end else begin
-                            c_ram[c_ram_wr_addr] <= enc_c_word_data;
+                            c_we_q <= 1'b1; c_wa_q <= c_ram_wr_addr; c_wd_q <= enc_c_word_data;
                         end
                         c_ram_wr_addr        <= c_ram_wr_addr + 7'd1;
                         words_written_r      <= words_written_r + 8'd1;
