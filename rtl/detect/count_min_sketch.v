@@ -275,16 +275,6 @@ always @(posedge clk) begin
         clear_addr <= 12'd0;
         fwd_valid  <= 1'b0;
     end else if (clearing) begin
-        flow_mem_0[clear_addr[10:0]] <= 16'd0;
-        flow_mem_1[clear_addr[10:0]] <= 16'd0;
-        flow_mem_2[clear_addr[10:0]] <= 16'd0;
-        flow_mem_3[clear_addr[10:0]] <= 16'd0;
-        if (clear_addr < 12'd1024) begin
-            host_mem_0[clear_addr[9:0]] <= 16'd0;
-            host_mem_1[clear_addr[9:0]] <= 16'd0;
-            host_mem_2[clear_addr[9:0]] <= 16'd0;
-            host_mem_3[clear_addr[9:0]] <= 16'd0;
-        end
         if (clear_addr == 12'd2047) begin
             clearing   <= 1'b0;
             clear_req  <= 1'b0;
@@ -294,17 +284,7 @@ always @(posedge clk) begin
             clear_addr <= clear_addr + 12'd1;
         end
     end else if (pipe_upd_en) begin
-        // Write updated counters to BRAM
-        flow_mem_0[upd_flow_idx_0] <= nxt_flow_0;
-        flow_mem_1[upd_flow_idx_1] <= nxt_flow_1;
-        flow_mem_2[upd_flow_idx_2] <= nxt_flow_2;
-        flow_mem_3[upd_flow_idx_3] <= nxt_flow_3;
-
-        host_mem_0[upd_host_idx_0] <= nxt_host_0;
-        host_mem_1[upd_host_idx_1] <= nxt_host_1;
-        host_mem_2[upd_host_idx_2] <= nxt_host_2;
-        host_mem_3[upd_host_idx_3] <= nxt_host_3;
-
+        // Counter writeback happens in the dedicated memory blocks below.
         // Register forwarding state
         fwd_valid      <= 1'b1;
         fwd_flow_idx_0 <= upd_flow_idx_0;
@@ -338,6 +318,43 @@ always @(posedge clk) begin
         fwd_valid <= 1'b0;
     end
 end
+
+// ---------------------------------------------------------------------------
+// Memory write ports (one write port per array, one always block per array)
+//
+// The writes used to sit inside the big control always block, behind several
+// priority branches and a synchronous reset. Vivado could not map that to block
+// RAM ("Infeasible attribute ram_style = block") and built all eight arrays
+// out of LUT RAM, about 12k LUTs. Each array now has a single write port, with
+// the enable/address/data chosen combinationally from the same conditions the
+// old branches used, so behaviour is identical and there is no added latency.
+//   clear sweep : rst low, clearing high          (original `clearing` branch)
+//   counter bump: rst low, clearing low, pipe_upd_en (original update branch;
+//                 the drain branch above it cannot fire while pipe_upd_en is 1)
+// ---------------------------------------------------------------------------
+wire wr_clr = !rst && clearing;
+wire wr_upd = !rst && !clearing && pipe_upd_en;
+
+wire        flow_we = wr_clr || wr_upd;
+wire [10:0] flow_wa_0 = wr_clr ? clear_addr[10:0] : upd_flow_idx_0;
+wire [10:0] flow_wa_1 = wr_clr ? clear_addr[10:0] : upd_flow_idx_1;
+wire [10:0] flow_wa_2 = wr_clr ? clear_addr[10:0] : upd_flow_idx_2;
+wire [10:0] flow_wa_3 = wr_clr ? clear_addr[10:0] : upd_flow_idx_3;
+
+wire        host_we = wr_upd || (wr_clr && (clear_addr < 12'd1024));
+wire [9:0]  host_wa_0 = wr_clr ? clear_addr[9:0] : upd_host_idx_0;
+wire [9:0]  host_wa_1 = wr_clr ? clear_addr[9:0] : upd_host_idx_1;
+wire [9:0]  host_wa_2 = wr_clr ? clear_addr[9:0] : upd_host_idx_2;
+wire [9:0]  host_wa_3 = wr_clr ? clear_addr[9:0] : upd_host_idx_3;
+
+always @(posedge clk) if (flow_we) flow_mem_0[flow_wa_0] <= wr_clr ? 16'd0 : nxt_flow_0;
+always @(posedge clk) if (flow_we) flow_mem_1[flow_wa_1] <= wr_clr ? 16'd0 : nxt_flow_1;
+always @(posedge clk) if (flow_we) flow_mem_2[flow_wa_2] <= wr_clr ? 16'd0 : nxt_flow_2;
+always @(posedge clk) if (flow_we) flow_mem_3[flow_wa_3] <= wr_clr ? 16'd0 : nxt_flow_3;
+always @(posedge clk) if (host_we) host_mem_0[host_wa_0] <= wr_clr ? 16'd0 : nxt_host_0;
+always @(posedge clk) if (host_we) host_mem_1[host_wa_1] <= wr_clr ? 16'd0 : nxt_host_1;
+always @(posedge clk) if (host_we) host_mem_2[host_wa_2] <= wr_clr ? 16'd0 : nxt_host_2;
+always @(posedge clk) if (host_we) host_mem_3[host_wa_3] <= wr_clr ? 16'd0 : nxt_host_3;
 
 // ============================================================================
 // SECTION 5: 4-Way Minimum Trees, Threshold Classifier & Verdict Output
