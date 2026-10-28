@@ -32,6 +32,7 @@ module test_poly1305_tb;
 
     reg [127:0] expected_tag;
 
+    wire        blk_ready;
     wire        busy;
     wire        tag_valid;
     wire [127:0] tag_out;
@@ -57,6 +58,7 @@ module test_poly1305_tb;
         .blk_len      (blk_len),
         .blk_last     (blk_last),
         .expected_tag (expected_tag),
+        .blk_ready    (blk_ready),
         .busy         (busy),
         .tag_valid    (tag_valid),
         .tag_out      (tag_out),
@@ -149,7 +151,7 @@ module test_poly1305_tb;
 
         // Count latency cycles from msg_eof deassertion to tag_valid
         latency_cycles = 0;
-        while (!tag_valid && latency_cycles < 50) begin
+        while (!tag_valid && latency_cycles < 100) begin
             @(posedge clk);
             latency_cycles = latency_cycles + 1;
         end
@@ -208,7 +210,7 @@ module test_poly1305_tb;
         msg_eof   = 0;
 
         latency_cycles = 0;
-        while (!tag_valid && latency_cycles < 50) begin
+        while (!tag_valid && latency_cycles < 100) begin
             @(posedge clk);
             latency_cycles = latency_cycles + 1;
         end
@@ -257,8 +259,9 @@ module test_poly1305_tb;
         @(negedge clk);
         blk_valid = 0;
 
-        // Wait 4 cycles for block 0 reduction
-        repeat (4) @(posedge clk);
+        // Honour the blk_ready handshake (multiply/reduce takes several clocks)
+        @(posedge clk);
+        while (!blk_ready) @(posedge clk);
 
         // Block 1 (16 bytes): rfc_msg[16..31]
         @(negedge clk);
@@ -272,8 +275,8 @@ module test_poly1305_tb;
         @(negedge clk);
         blk_valid = 0;
 
-        // Wait 4 cycles for block 1 reduction
-        repeat (4) @(posedge clk);
+        @(posedge clk);
+        while (!blk_ready) @(posedge clk);
 
         // Block 2 (2 bytes): rfc_msg[32..33]
         @(negedge clk);
@@ -285,7 +288,7 @@ module test_poly1305_tb;
         blk_valid = 0;
 
         latency_cycles = 0;
-        while (!tag_valid && latency_cycles < 50) begin
+        while (!tag_valid && latency_cycles < 100) begin
             @(posedge clk);
             latency_cycles = latency_cycles + 1;
         end
@@ -324,7 +327,7 @@ module test_poly1305_tb;
         blk_valid = 0;
 
         latency_cycles = 0;
-        while (!tag_valid && latency_cycles < 50) begin
+        while (!tag_valid && latency_cycles < 100) begin
             @(posedge clk);
             latency_cycles = latency_cycles + 1;
         end
