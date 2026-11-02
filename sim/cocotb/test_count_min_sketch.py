@@ -338,18 +338,31 @@ async def cms_epoch_sweep_length(dut):
     # cycle, so EPOCH_N - 2 would only advance the counter.
     dut.epoch_pkt_count.value = int(dut.EPOCH_N.value) - 1
     await FallingEdge(dut.clk)
+
+    # Count `clearing` cycles from a monitor that is already running when the
+    # packet goes in. The verdict (and so send_packet_header's return) trails
+    # the update stage, so the sweep can already be under way by the time the
+    # packet call returns; sampling only afterwards would miss its first cycles.
+    seen = {"n": 0, "started": False}
+
+    async def count_sweep():
+        while True:
+            await FallingEdge(dut.clk)
+            if int(dut.clearing.value) == 1:
+                seen["n"] += 1
+                seen["started"] = True
+
+    mon = cocotb.start_soon(count_sweep())
     await send_packet_header(dut, 0x0A000001, 80)
 
-    for _ in range(200):
+    for _ in range(5000):
         await FallingEdge(dut.clk)
-        if int(dut.clearing.value) == 1:
+        if seen["started"] and int(dut.clearing.value) == 0:
             break
-    assert int(dut.clearing.value) == 1, "the sweep never started"
-
-    n = 0
-    while int(dut.clearing.value) == 1 and n < 5000:
-        await FallingEdge(dut.clk)
-        n += 1
+    await FallingEdge(dut.clk)
+    mon.kill()
+    assert seen["started"], "the sweep never started"
+    n = seen["n"]
     assert n == 2048, f"clearing was asserted for {n} cycles, expected 2048"
 
 def test_runner():
