@@ -111,6 +111,7 @@ reg [11:0] bypass_cnt;     // packets admitted to neither the sketch nor a verdi
 // SECTION 3: Hash Calculation Stage & Address Pipeline
 // ============================================================================
 wire        hash_out_valid;
+wire        hash_pending;
 wire [10:0] flow_hash_0, flow_hash_1, flow_hash_2, flow_hash_3;
 wire [9:0]  host_hash_0, host_hash_1, host_hash_2, host_hash_3;
 
@@ -118,8 +119,10 @@ wire [9:0]  host_hash_0, host_hash_1, host_hash_2, host_hash_3;
 wire admit     = header_valid && ready && !clearing && !clear_req;
 // ...otherwise it is bypassed and gets an explicit pass verdict.
 wire bypass    = header_valid && !admit;
-// True while any of the four pipeline stages still holds a packet.
-wire pipe_busy = hash_out_valid || pipe_rd_en || pipe_upd_en;
+reg pipe_rd_en;
+reg pipe_upd_en;
+// True while any pipeline stage (hash included) still holds a packet.
+wire pipe_busy = hash_pending || hash_out_valid || pipe_rd_en || pipe_upd_en;
 
 hash_functions u_hash (
     .clk        (clk),
@@ -127,6 +130,7 @@ hash_functions u_hash (
     .in_valid   (admit),
     .src_ip     (src_ip),
     .dst_port   (dst_port),
+    .pending    (hash_pending),
     .out_valid  (hash_out_valid),
     .flow_idx_0 (flow_hash_0),
     .flow_idx_1 (flow_hash_1),
@@ -139,7 +143,6 @@ hash_functions u_hash (
 );
 
 // Pipeline Stage 1 registers (BRAM Read Address)
-reg        pipe_rd_en;
 reg [10:0] rd_flow_idx_0, rd_flow_idx_1, rd_flow_idx_2, rd_flow_idx_3;
 reg [9:0]  rd_host_idx_0, rd_host_idx_1, rd_host_idx_2, rd_host_idx_3;
 
@@ -187,7 +190,6 @@ always @(posedge clk) begin
 end
 
 // Pipeline Stage 2 registers (Address forwarding & writeback target)
-reg        pipe_upd_en;
 reg [10:0] upd_flow_idx_0, upd_flow_idx_1, upd_flow_idx_2, upd_flow_idx_3;
 reg [9:0]  upd_host_idx_0, upd_host_idx_1, upd_host_idx_2, upd_host_idx_3;
 

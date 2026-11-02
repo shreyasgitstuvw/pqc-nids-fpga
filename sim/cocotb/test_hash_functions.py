@@ -26,6 +26,8 @@ import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import FallingEdge, RisingEdge
 
+HASH_LATENCY = 3  # cycles from in_valid to out_valid (3-stage pipeline)
+
 from model.detect import (
     DEFAULT_FLOW_CMS_WIDTH,
     DEFAULT_HOST_CMS_WIDTH,
@@ -91,8 +93,11 @@ async def hash_functions_vectors(dut):
         await RisingEdge(dut.clk)
         await FallingEdge(dut.clk)
         dut.in_valid.value = 0
+        for _ in range(HASH_LATENCY - 1):
+            await RisingEdge(dut.clk)
+            await FallingEdge(dut.clk)
 
-        # Sample registered outputs on 1-cycle latency
+        # Sample registered outputs after HASH_LATENCY cycles
         assert int(dut.out_valid.value) == 1, "out_valid was not asserted"
         assert int(dut.flow_idx_0.value) == exp_flow[0], f"flow_idx_0 mismatch: got {int(dut.flow_idx_0.value)}, exp {exp_flow[0]}"
         assert int(dut.flow_idx_1.value) == exp_flow[1], f"flow_idx_1 mismatch: got {int(dut.flow_idx_1.value)}, exp {exp_flow[1]}"
@@ -130,6 +135,9 @@ async def hash_functions_fuzz(dut):
         await RisingEdge(dut.clk)
         await FallingEdge(dut.clk)
         dut.in_valid.value = 0
+        for _ in range(HASH_LATENCY - 1):
+            await RisingEdge(dut.clk)
+            await FallingEdge(dut.clk)
 
         assert int(dut.out_valid.value) == 1, f"Trial {trial}: out_valid was 0"
         for j in range(4):
@@ -157,37 +165,27 @@ async def hash_functions_streaming(dut):
 
     expected = [calc_expected_indices(ip, port) for ip, port in pairs]
 
-    dut.src_ip.value = pairs[0][0]
-    dut.dst_port.value = pairs[0][1]
-    dut.in_valid.value = 1
-
-    for i in range(1, len(pairs)):
+    for c in range(len(pairs) + HASH_LATENCY + 2):
+        if c < len(pairs):
+            dut.src_ip.value = pairs[c][0]
+            dut.dst_port.value = pairs[c][1]
+            dut.in_valid.value = 1
+        else:
+            dut.in_valid.value = 0
         await RisingEdge(dut.clk)
         await FallingEdge(dut.clk)
-        # Output for pair i-1 is ready
-        exp_f, exp_h = expected[i - 1]
-        assert int(dut.out_valid.value) == 1
-        for j in range(4):
-            assert int(getattr(dut, f"flow_idx_{j}").value) == exp_f[j]
-            assert int(getattr(dut, f"host_idx_{j}").value) == exp_h[j]
+        k = c - (HASH_LATENCY - 1)
+        if 0 <= k < len(pairs):
+            exp_f, exp_h = expected[k]
+            assert int(dut.out_valid.value) == 1, f"cycle {c}: out_valid low"
+            for j in range(4):
+                assert int(getattr(dut, f"flow_idx_{j}").value) == exp_f[j]
+                assert int(getattr(dut, f"host_idx_{j}").value) == exp_h[j]
+        else:
+            assert int(dut.out_valid.value) == 0, f"cycle {c}: spurious out_valid"
 
-        dut.src_ip.value = pairs[i][0]
-        dut.dst_port.value = pairs[i][1]
-        dut.in_valid.value = 1
-
-    # Final output
-    await RisingEdge(dut.clk)
-    await FallingEdge(dut.clk)
-    dut.in_valid.value = 0
-    exp_f, exp_h = expected[-1]
-    assert int(dut.out_valid.value) == 1
-    for j in range(4):
-        assert int(getattr(dut, f"flow_idx_{j}").value) == exp_f[j]
-        assert int(getattr(dut, f"host_idx_{j}").value) == exp_h[j]
-
-    await RisingEdge(dut.clk)
-    await FallingEdge(dut.clk)
-    assert int(dut.out_valid.value) == 0
+    # pending must drop once the pipe has drained
+    assert int(dut.pending.value) == 0
 
 
 def test_runner():
