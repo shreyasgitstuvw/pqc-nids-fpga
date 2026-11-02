@@ -245,7 +245,13 @@ module mlkem_top (
     // -------------------------------------------------------------------------
     // Decapsulation Key Storage BRAM (204 words x 64 bits = 1632 bytes)
     // -------------------------------------------------------------------------
-    reg [63:0] dk_ram [0:203];
+    // Single registered write port -> infers distributed RAM (was a 204x64 flop array
+    // with a per-word write decode: ~13k FFs, huge fanout, 14 ns routed nets).
+    (* ram_style = "distributed" *) reg [63:0] dk_ram [0:203];
+    reg         dk_we_q;
+    reg  [7:0]  dk_wa_q;
+    reg  [63:0] dk_wd_q;
+    always @(posedge clk) if (dk_we_q) dk_ram[dk_wa_q] <= dk_wd_q;
     reg [7:0]  dk_ram_wr_addr;
 
     reg [7:0]  int_dk_rd_addr;
@@ -1011,6 +1017,7 @@ module mlkem_top (
 
             c_we_q  <= 1'b0;
             ek_we_q <= 1'b0;
+            dk_we_q <= 1'b0;
             if (!busy && c_ram_wr_en) begin
                 c_we_q <= 1'b1; c_wa_q <= c_ram_wr_addr_ext; c_wd_q <= c_ram_wr_data_ext;
             end
@@ -1018,7 +1025,7 @@ module mlkem_top (
                 ek_we_q <= 1'b1; ek_wa_q <= ek_ram_wr_addr_ext; ek_wd_q <= ek_ram_wr_data_ext;
             end
             if (!busy && dk_ram_wr_en) begin
-                dk_ram[dk_ram_wr_addr_ext] <= dk_ram_wr_data_ext;
+                begin dk_we_q <= 1'b1; dk_wa_q <= dk_ram_wr_addr_ext; dk_wd_q <= dk_ram_wr_data_ext; end
             end
 
             case (state_r)
@@ -1359,7 +1366,7 @@ module mlkem_top (
 
                 S_ENC_STREAM: begin
                     if (enc_out_valid) begin
-                        dk_ram[dk_ram_wr_addr] <= enc_out_data;
+                        begin dk_we_q <= 1'b1; dk_wa_q <= dk_ram_wr_addr; dk_wd_q <= enc_out_data; end
                         dk_ram_wr_addr         <= dk_ram_wr_addr + 8'd1;
                         words_written_r        <= words_written_r + 8'd1;
                     end
@@ -1377,7 +1384,7 @@ module mlkem_top (
                 S_ENC_WAIT_DRAIN: begin
                     enc_read_valid <= 1'b0;
                     if (enc_out_valid) begin
-                        dk_ram[dk_ram_wr_addr] <= enc_out_data;
+                        begin dk_we_q <= 1'b1; dk_wa_q <= dk_ram_wr_addr; dk_wd_q <= enc_out_data; end
                         dk_ram_wr_addr         <= dk_ram_wr_addr + 8'd1;
                         words_written_r        <= words_written_r + 8'd1;
                         if (words_written_r == 8'd47) begin
@@ -1395,10 +1402,10 @@ module mlkem_top (
                 S_WRITE_RHO: begin
                     // Write rho (32 bytes = 4 words) to dk_ram[192..195]
                     case (feed_cnt)
-                        3'd0: dk_ram[8'd192] <= reg_rho[ 63:  0];
-                        3'd1: dk_ram[8'd193] <= reg_rho[127: 64];
-                        3'd2: dk_ram[8'd194] <= reg_rho[191:128];
-                        3'd3: dk_ram[8'd195] <= reg_rho[255:192];
+                        3'd0: begin dk_we_q <= 1'b1; dk_wa_q <= 8'd192; dk_wd_q <= reg_rho[ 63:  0]; end
+                        3'd1: begin dk_we_q <= 1'b1; dk_wa_q <= 8'd193; dk_wd_q <= reg_rho[127: 64]; end
+                        3'd2: begin dk_we_q <= 1'b1; dk_wa_q <= 8'd194; dk_wd_q <= reg_rho[191:128]; end
+                        3'd3: begin dk_we_q <= 1'b1; dk_wa_q <= 8'd195; dk_wd_q <= reg_rho[255:192]; end
                         default: ;
                     endcase
                     feed_cnt <= feed_cnt + 3'd1;
@@ -1444,10 +1451,10 @@ module mlkem_top (
                     fsm_shake_out_ready <= 1'b1;
                     if (shake_out_valid && fsm_shake_out_ready) begin
                         case (feed_cnt)
-                            3'd0: begin reg_hek[ 63:  0] <= shake_out_data; if (op_r == OP_KEYGEN) dk_ram[8'd196] <= shake_out_data; end
-                            3'd1: begin reg_hek[127: 64] <= shake_out_data; if (op_r == OP_KEYGEN) dk_ram[8'd197] <= shake_out_data; end
-                            3'd2: begin reg_hek[191:128] <= shake_out_data; if (op_r == OP_KEYGEN) dk_ram[8'd198] <= shake_out_data; end
-                            3'd3: begin reg_hek[255:192] <= shake_out_data; if (op_r == OP_KEYGEN) dk_ram[8'd199] <= shake_out_data; end
+                            3'd0: begin reg_hek[ 63:  0] <= shake_out_data; if (op_r == OP_KEYGEN) begin dk_we_q <= 1'b1; dk_wa_q <= 8'd196; dk_wd_q <= shake_out_data; end end
+                            3'd1: begin reg_hek[127: 64] <= shake_out_data; if (op_r == OP_KEYGEN) begin dk_we_q <= 1'b1; dk_wa_q <= 8'd197; dk_wd_q <= shake_out_data; end end
+                            3'd2: begin reg_hek[191:128] <= shake_out_data; if (op_r == OP_KEYGEN) begin dk_we_q <= 1'b1; dk_wa_q <= 8'd198; dk_wd_q <= shake_out_data; end end
+                            3'd3: begin reg_hek[255:192] <= shake_out_data; if (op_r == OP_KEYGEN) begin dk_we_q <= 1'b1; dk_wa_q <= 8'd199; dk_wd_q <= shake_out_data; end end
                             default: ;
                         endcase
                         feed_cnt <= feed_cnt + 3'd1;
@@ -1463,10 +1470,10 @@ module mlkem_top (
                 S_WRITE_Z: begin
                     // Write z (32 bytes = 4 words) to dk_ram[200..203]
                     case (feed_cnt)
-                        3'd0: dk_ram[8'd200] <= seed_z[ 63:  0];
-                        3'd1: dk_ram[8'd201] <= seed_z[127: 64];
-                        3'd2: dk_ram[8'd202] <= seed_z[191:128];
-                        3'd3: dk_ram[8'd203] <= seed_z[255:192];
+                        3'd0: begin dk_we_q <= 1'b1; dk_wa_q <= 8'd200; dk_wd_q <= seed_z[ 63:  0]; end
+                        3'd1: begin dk_we_q <= 1'b1; dk_wa_q <= 8'd201; dk_wd_q <= seed_z[127: 64]; end
+                        3'd2: begin dk_we_q <= 1'b1; dk_wa_q <= 8'd202; dk_wd_q <= seed_z[191:128]; end
+                        3'd3: begin dk_we_q <= 1'b1; dk_wa_q <= 8'd203; dk_wd_q <= seed_z[255:192]; end
                         default: ;
                     endcase
                     feed_cnt <= feed_cnt + 3'd1;

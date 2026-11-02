@@ -361,14 +361,38 @@ always @(posedge clk) if (host_we) host_mem_3[host_wa_3] <= wr_clr ? 16'd0 : nxt
 // ============================================================================
 // SECTION 5: 4-Way Minimum Trees, Threshold Classifier & Verdict Output
 // ============================================================================
-// 4-Way Minimum Tree for Flow Sketch
-wire [15:0] min_f_01 = (nxt_flow_0 < nxt_flow_1) ? nxt_flow_0 : nxt_flow_1;
-wire [15:0] min_f_23 = (nxt_flow_2 < nxt_flow_3) ? nxt_flow_2 : nxt_flow_3;
-wire [15:0] calc_min_flow = (min_f_01 < min_f_23) ? min_f_01 : min_f_23;
+// The verdict used to be computed in the same cycle as the BRAM read, the
+// forwarding mux and the +1: BRAM clk->Q, three 16-bit compare chains and the
+// threshold compares (15 logic levels, 14.4 ns routed). The counters are still
+// written back from nxt_* in the update stage; the verdict now trails by two
+// register stages and costs two extra cycles of verdict latency:
+//   V1: register the eight updated counters
+//   V2: register the pairwise minima            (first compare level)
+//   out: final minimum, thresholds, verdict reg (second level + thresholds)
+reg        v1_en, v2_en;
+reg [15:0] v1_flow_0, v1_flow_1, v1_flow_2, v1_flow_3;
+reg [15:0] v1_host_0, v1_host_1, v1_host_2, v1_host_3;
+reg [15:0] min_f_01, min_f_23, min_h_01, min_h_23;
 
-// 4-Way Minimum Tree for Host Sketch
-wire [15:0] min_h_01 = (nxt_host_0 < nxt_host_1) ? nxt_host_0 : nxt_host_1;
-wire [15:0] min_h_23 = (nxt_host_2 < nxt_host_3) ? nxt_host_2 : nxt_host_3;
+always @(posedge clk) begin
+    if (rst) begin
+        v1_en <= 1'b0;
+        v2_en <= 1'b0;
+    end else begin
+        v1_en <= pipe_upd_en;
+        v2_en <= v1_en;
+    end
+    v1_flow_0 <= nxt_flow_0;  v1_flow_1 <= nxt_flow_1;
+    v1_flow_2 <= nxt_flow_2;  v1_flow_3 <= nxt_flow_3;
+    v1_host_0 <= nxt_host_0;  v1_host_1 <= nxt_host_1;
+    v1_host_2 <= nxt_host_2;  v1_host_3 <= nxt_host_3;
+    min_f_01  <= (v1_flow_0 < v1_flow_1) ? v1_flow_0 : v1_flow_1;
+    min_f_23  <= (v1_flow_2 < v1_flow_3) ? v1_flow_2 : v1_flow_3;
+    min_h_01  <= (v1_host_0 < v1_host_1) ? v1_host_0 : v1_host_1;
+    min_h_23  <= (v1_host_2 < v1_host_3) ? v1_host_2 : v1_host_3;
+end
+
+wire [15:0] calc_min_flow = (min_f_01 < min_f_23) ? min_f_01 : min_f_23;
 wire [15:0] calc_min_host = (min_h_01 < min_h_23) ? min_h_01 : min_h_23;
 
 // Threshold Evaluation Logic
@@ -385,7 +409,7 @@ wire [3:0] comb_reason = is_flood ? `RC_FLOOD :
 // A bypass verdict is emitted on any cycle a real verdict is not using the
 // output register. `bypass` on the same cycle is served directly rather than
 // queued, so the counter only ever holds verdicts that had to wait.
-wire emit_bypass = !pipe_upd_en && ((bypass_cnt != 12'd0) || bypass);
+wire emit_bypass = !v2_en && ((bypass_cnt != 12'd0) || bypass);
 
 always @(posedge clk) begin
     if (rst) begin
@@ -404,7 +428,7 @@ always @(posedge clk) begin
         verdict_reason <= `RC_NONE;
         c_flow_out     <= 16'd0;
         c_host_out     <= 16'd0;
-    end else if (pipe_upd_en) begin
+    end else if (v2_en) begin
         verdict_valid  <= 1'b1;
         verdict_fail   <= comb_fail;
         verdict_reason <= comb_reason;
