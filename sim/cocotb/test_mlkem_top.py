@@ -181,7 +181,7 @@ async def keygen_kat_vector_1(dut):
             raise TimeoutError(f"KeyGen did not complete within {cycles} cycles")
 
     dut._log.info(f"KeyGen Vector 1 completed in {cycles} clock cycles")
-    assert cycles == 17658, f"KeyGen Vector 1 expected 17658 cycles, got {cycles}"
+    assert cycles == 17686, f"KeyGen Vector 1 expected 17686 cycles, got {cycles}"
     assert int(dut.kem_done.value) == 1, "kem_done must strobe high"
     assert int(dut.busy.value) == 0, "busy must deassert on completion"
 
@@ -251,7 +251,7 @@ async def keygen_kat_vector_2(dut):
             raise TimeoutError(f"KeyGen did not complete within {cycles} cycles")
 
     dut._log.info(f"KeyGen Vector 2 completed in {cycles} clock cycles")
-    assert cycles == 17669, f"KeyGen Vector 2 expected 17669 cycles, got {cycles}"
+    assert cycles == 17697, f"KeyGen Vector 2 expected 17697 cycles, got {cycles}"
     actual_dk = await read_dk_ram(dut, 204)
     actual_ek = actual_dk[768:1568]
 

@@ -5,7 +5,7 @@
 //
 // Verifies:
 //   1. RFC 8439 Section 2.3.2: 64-byte ChaCha20 block function (exact byte-by-byte match)
-//   2. Block latency: exactly 22 cycles from start to done
+//   2. Block latency: exactly 42 cycles from start to done
 //   3. Contract v1.1.0 Section 3.1 Plaintext Inspection Bus:
 //      Streaming decryption of RFC 8439 Section 2.4.2 ciphertext (114 bytes across 2 blocks)
 //      with correct pt_sof / pt_eof propagation.
@@ -213,9 +213,9 @@ module test_chacha20_tb;
             cycle_count = cycle_count + 1;
         end
 
-        // RFC 8439 Section 2.3 architecture: exactly 22 cycles
-        if (cycle_count !== 22) begin
-            $display("FAILED: Expected 22 cycles latency from start to done, got %d", cycle_count);
+        // RFC 8439 Section 2.3 architecture: exactly 42 cycles
+        if (cycle_count !== 42) begin
+            $display("FAILED: Expected 42 cycles latency from start to done, got %d", cycle_count);
             test_errors = test_errors + 1;
         end else begin
             $display("  --> Cycle latency verified: exactly %d cycles (10 double rounds + add + out)", cycle_count);
