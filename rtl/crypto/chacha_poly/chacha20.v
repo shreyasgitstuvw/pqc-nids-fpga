@@ -5,12 +5,13 @@
 //
 // Architecture
 // ============
-// One 64-byte keystream block per 42 clock cycles:
+// One 64-byte keystream block per 82 clock cycles:
 //   Cycle 0        : latch key / counter / nonce into s_init[15:0]
-//   Cycles 1..40   : 20 rounds, 2 cycles each (half-round per cycle; col-round on
-//                    odd round count, diag-round on even); 4 QRs in parallel
-//   Cycle 41       : add s_work + s_init, register result
-//   Cycle 42       : assert done, keystream_block valid
+//   Cycles 1..80   : 20 rounds, 4 cycles each (one add/xor/rotate step per cycle;
+//                    col-round on odd round count, diag-round on even); 4 QRs in
+//                    parallel
+//   Cycle 81       : add s_work + s_init, register result
+//   Cycle 82       : assert done, keystream_block valid
 //
 // Plaintext inspection bus (contract v1.1.0 Section 3.1)
 // ======================================================
@@ -62,7 +63,7 @@ module chacha20 (
     // Round counter: 0=idle, 1..20=rounds, 21=add, 22=out
     // =========================================================================
     reg [4:0] round_cnt;
-    reg       half;      // 0: first half of a round, 1: second half
+    reg [1:0] step;      // quarter-round step within a round: 0..3
 
     // =========================================================================
     // 16-word working and initial state
@@ -79,19 +80,22 @@ module chacha20 (
     // Quarter-round function (pure combinational)
     // Returns {a_out, b_out, c_out, d_out} packed into 128 bits.
     // =========================================================================
-    // Half quarter-round: two add/xor/rotate steps per cycle (half=0: rot16,rot12;
-    // half=1: rot8,rot7). Splitting halves the carry-chain depth per cycle.
+    // One quarter-round step per cycle (a single 32-bit add + xor + rotate).
+    //   step 0: a+=b; d^=a; d<<<=16     step 1: c+=d; b^=c; b<<<=12
+    //   step 2: a+=b; d^=a; d<<<=8      step 3: c+=d; b^=c; b<<<=7
+    // One adder deep keeps the carry chain within the 10 ns budget.
     function [127:0] qr_fn;
-        input        hsel;
+        input [1:0]  st;
         input [31:0] a, b, c, d;
         reg [31:0] ar, br, cr, dr;
         begin
-            ar = a + b;  dr = d ^ ar;
-            if (!hsel) dr = (dr << 16) | (dr >> 16);
-            else       dr = (dr <<  8) | (dr >> 24);
-            cr = c + dr; br = b ^ cr;
-            if (!hsel) br = (br << 12) | (br >> 20);
-            else       br = (br <<  7) | (br >> 25);
+            ar = a; br = b; cr = c; dr = d;
+            case (st)
+                2'd0: begin ar = a + b; dr = d ^ ar; dr = (dr << 16) | (dr >> 16); end
+                2'd1: begin cr = c + d; br = b ^ cr; br = (br << 12) | (br >> 20); end
+                2'd2: begin ar = a + b; dr = d ^ ar; dr = (dr <<  8) | (dr >> 24); end
+                default: begin cr = c + d; br = b ^ cr; br = (br <<  7) | (br >> 25); end
+            endcase
             qr_fn = {ar, br, cr, dr};
         end
     endfunction
@@ -104,10 +108,10 @@ module chacha20 (
     reg [31:0] in2a, in2b, in2c, in2d;
     reg [31:0] in3a, in3b, in3c, in3d;
 
-    wire [127:0] out0 = qr_fn(half, in0a, in0b, in0c, in0d);
-    wire [127:0] out1 = qr_fn(half, in1a, in1b, in1c, in1d);
-    wire [127:0] out2 = qr_fn(half, in2a, in2b, in2c, in2d);
-    wire [127:0] out3 = qr_fn(half, in3a, in3b, in3c, in3d);
+    wire [127:0] out0 = qr_fn(step, in0a, in0b, in0c, in0d);
+    wire [127:0] out1 = qr_fn(step, in1a, in1b, in1c, in1d);
+    wire [127:0] out2 = qr_fn(step, in2a, in2b, in2c, in2d);
+    wire [127:0] out3 = qr_fn(step, in3a, in3b, in3c, in3d);
 
     // Column round (round_cnt odd): QR(0,4,8,12), QR(1,5,9,13), QR(2,6,10,14), QR(3,7,11,15)
     // Diagonal round (even):        QR(0,5,10,15), QR(1,6,11,12), QR(2,7,8,13), QR(3,4,9,14)
@@ -139,7 +143,7 @@ module chacha20 (
     always @(posedge clk) begin
         if (rst) begin
             round_cnt       <= 5'd0;
-            half            <= 1'b0;
+            step            <= 2'd0;
             busy            <= 1'b0;
             done            <= 1'b0;
             ks_byte_idx     <= 6'd0;
@@ -181,7 +185,7 @@ module chacha20 (
                 s_init[15] <= nonce[95:64]; s_work[15] <= nonce[95:64];
                 busy       <= 1'b1;
                 round_cnt  <= 5'd1;
-                half       <= 1'b0;
+                step       <= 2'd0;
                 ks_byte_idx <= 6'd0;
             end
 
@@ -200,8 +204,8 @@ module chacha20 (
                     {s_work[2], s_work[7],  s_work[8],  s_work[13]} <= out2;
                     {s_work[3], s_work[4],  s_work[9],  s_work[14]} <= out3;
                 end
-                half <= ~half;
-                if (half) round_cnt <= round_cnt + 5'd1;
+                step <= step + 2'd1;
+                if (step == 2'd3) round_cnt <= round_cnt + 5'd1;
             end
 
             // ------------------------------------------------------------------

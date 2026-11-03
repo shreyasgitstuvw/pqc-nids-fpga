@@ -16,7 +16,7 @@
 //   - Asserts 1-cycle 'done' pulse at completion.
 //
 // Timing & Resource Estimates (XC7Z020 @ 100 MHz, estimated, pre-synthesis):
-//   - Latency: exactly 259 clock cycles per polynomial (256 stream + 3 pipeline latency, backed by assert in test_poly_add_sub.py)
+//   - Latency: exactly 260 clock cycles per polynomial (256 stream + 4 pipeline latency, backed by assert in test_poly_add_sub.py)
 //   - DSP48E1: 0 slices (estimated, pre-synthesis)
 //   - Slice LUTs: ~45-65 LUTs (estimated, pre-synthesis)
 //   - Slice FFs: ~40-55 registers (estimated, pre-synthesis)
@@ -62,8 +62,18 @@ module poly_add_sub (
     reg [8:0] rd_cnt;
 
     // Pipeline tracking for 2-stage latency (BRAM read + arithmetic register)
-    reg [1:0] pipe_valid;
-    reg [7:0] pipe_addr_0;
+    reg [2:0] pipe_valid;
+    reg [7:0] pipe_addr_0, pipe_addr_1;
+
+    // Operand registers: BRAM data goes through the top-level bank mux, so it is
+    // captured here before the mod-q arithmetic (timing: BRAM clk-to-q + mux + adder
+    // chain did not fit in 10 ns).
+    reg [11:0] ra_r, rb_r, rc_r;
+    always @(posedge clk) begin
+        ra_r <= rdata_a;
+        rb_r <= rdata_b;
+        rc_r <= rdata_c;
+    end
 
     reg       done_r;
 
@@ -74,14 +84,14 @@ module poly_add_sub (
     // Combinational Modular Arithmetic on incoming BRAM data
     // -------------------------------------------------------------------------
     // 1. Two-operand addition: (a + b) mod Q
-    wire [12:0] sum2_raw = {1'b0, rdata_a} + {1'b0, rdata_b};
+    wire [12:0] sum2_raw = {1'b0, ra_r} + {1'b0, rb_r};
     wire [11:0] sum2_res = (sum2_raw >= {1'b0, Q}) ? (sum2_raw[11:0] - Q) : sum2_raw[11:0];
 
     // 2. Two-operand subtraction: (a - b) mod Q
-    wire [11:0] sub_res  = (rdata_a >= rdata_b) ? (rdata_a - rdata_b) : (rdata_a + Q - rdata_b);
+    wire [11:0] sub_res  = (ra_r >= rb_r) ? (ra_r - rb_r) : (ra_r + Q - rb_r);
 
     // 3. Three-operand addition: (a + b + c) mod Q
-    wire [13:0] sum3_raw = {2'b00, rdata_a} + {2'b00, rdata_b} + {2'b00, rdata_c};
+    wire [13:0] sum3_raw = {2'b00, ra_r} + {2'b00, rb_r} + {2'b00, rc_r};
     reg  [11:0] sum3_res;
     always @(*) begin
         if (sum3_raw >= {1'b0, Q2})
@@ -112,8 +122,9 @@ module poly_add_sub (
             mode_r      <= MODE_ADD;
             rd_cnt      <= 9'd0;
             rd_addr     <= 8'd0;
-            pipe_valid  <= 2'd0;
+            pipe_valid  <= 3'd0;
             pipe_addr_0 <= 8'd0;
+            pipe_addr_1 <= 8'd0;
             wr_addr     <= 8'd0;
             wr_we       <= 1'b0;
             wr_data     <= 12'd0;
@@ -123,14 +134,14 @@ module poly_add_sub (
 
             case (state)
                 S_IDLE: begin
-                    pipe_valid <= 2'd0;
+                    pipe_valid <= 3'd0;
                     wr_we      <= 1'b0;
                     if (start) begin
                         state       <= S_RUN;
                         mode_r      <= mode;
                         rd_cnt      <= 9'd1;
                         rd_addr     <= 8'd0;
-                        pipe_valid  <= 2'b01; // Stage 0 active
+                        pipe_valid  <= 3'b001; // Stage 0 active
                         pipe_addr_0 <= 8'd0;
                     end
                 end
@@ -140,21 +151,22 @@ module poly_add_sub (
                     if (rd_cnt < 9'd256) begin
                         rd_addr    <= rd_cnt[7:0];
                         rd_cnt     <= rd_cnt + 9'd1;
-                        pipe_valid <= {pipe_valid[0], 1'b1};
+                        pipe_valid <= {pipe_valid[1:0], 1'b1};
                     end else begin
-                        pipe_valid <= {pipe_valid[0], 1'b0};
+                        pipe_valid <= {pipe_valid[1:0], 1'b0};
                     end
 
                     // Pipeline Address Tracking
                     pipe_addr_0 <= rd_addr;
+                    pipe_addr_1 <= pipe_addr_0;
 
                     // Pipeline Write Stage (latches arithmetic result)
-                    wr_we   <= pipe_valid[1];
-                    wr_addr <= pipe_addr_0;
+                    wr_we   <= pipe_valid[2];
+                    wr_addr <= pipe_addr_1;
                     wr_data <= arith_res;
 
                     // When final coefficient (255) is in write stage, transition to S_DONE
-                    if (pipe_valid[1] && (pipe_addr_0 == 8'd255)) begin
+                    if (pipe_valid[2] && (pipe_addr_1 == 8'd255)) begin
                         state <= S_DONE;
                     end
                 end

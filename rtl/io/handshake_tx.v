@@ -88,7 +88,7 @@ module handshake_tx (
 
     // ---- IPv4 header checksum over the 10 header words ----
     // Fields are fixed except the addresses and the id, so this is a small
-    // combinational fold evaluated once in S_PREP.
+    // pipelined fold, settled during S_PREP.
     wire [15:0] w0 = 16'h4500;
     wire [15:0] w1 = IP_TOTAL_LEN;
     wire [15:0] w2 = ip_id;
@@ -99,12 +99,20 @@ module handshake_tx (
     wire [15:0] w8 = ip_dst[31:16];
     wire [15:0] w9 = ip_dst[15:0];
     // w5 is the checksum field itself, taken as zero while summing.
-    wire [19:0] csum_sum = {4'd0, w0} + {4'd0, w1} + {4'd0, w2} + {4'd0, w3}
-                         + {4'd0, w4} + {4'd0, w6} + {4'd0, w7} + {4'd0, w8}
-                         + {4'd0, w9};
+    // Three-stage pipeline (free running; S_PREP waits for it to settle):
+    //   stage 1: partial sums, stage 2: total, stage 3: fold + invert.
+    reg  [19:0] cs_a, cs_b, cs_c;
+    reg  [19:0] csum_sum;
+    always @(posedge clk) begin
+        cs_a     <= {4'd0, w0} + {4'd0, w1} + {4'd0, w2} + {4'd0, w3} + {4'd0, w4};
+        cs_b     <= {4'd0, w6} + {4'd0, w7};
+        cs_c     <= {4'd0, w8} + {4'd0, w9};
+        csum_sum <= cs_a + cs_b + cs_c;
+    end
     wire [16:0] fold1    = {1'b0, csum_sum[15:0]} + {13'd0, csum_sum[19:16]};
     wire [15:0] fold2    = fold1[15:0] + {15'd0, fold1[16]};
     wire [15:0] ip_csum  = ~fold2;
+    reg  [1:0]  prep_cnt;
     reg  [15:0] ip_csum_r;
 
     // ---- CRC-32 over the payload, same engine the receiver uses ----
@@ -264,14 +272,20 @@ module handshake_tx (
                         idx           <= 16'd0;
                         c_ram_rd_addr <= 7'd0;
                         busy          <= 1'b1;
+                        prep_cnt      <= 2'd0;
                         state         <= S_PREP;
                     end
                 end
 
                 S_PREP: begin
                     // Addresses are registered now, so the checksum fold is valid.
-                    ip_csum_r <= ip_csum;
-                    state     <= S_SEND;
+                    // cs_* valid after 1 cycle, csum_sum after 2, ip_csum after 2
+                    // (combinational fold of csum_sum); latch on the 3rd.
+                    prep_cnt <= prep_cnt + 2'd1;
+                    if (prep_cnt == 2'd2) begin
+                        ip_csum_r <= ip_csum;
+                        state     <= S_SEND;
+                    end
                 end
 
                 S_SEND: begin
