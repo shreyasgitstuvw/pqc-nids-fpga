@@ -37,7 +37,7 @@ module butterfly #(
     input  wire [11:0] u,         // Primary input coefficient in [0, 3328]
     input  wire [11:0] v,         // Secondary input coefficient in [0, 3328]
     input  wire [11:0] zeta,      // Twiddle factor in [0, 3328]
-    output wire        valid_out, // Valid 4 cycles after en
+    output wire        valid_out, // Valid 5 cycles after en
     output wire [11:0] u_out,     // Primary output coefficient in [0, 3328]
     output wire [11:0] v_out      // Secondary output coefficient in [0, 3328]
 );
@@ -52,10 +52,31 @@ module butterfly #(
     // Input Pre-processing for GS Mode (Single-cycle Combinational before modmul)
     // -------------------------------------------------------------------------
     // In GS mode: u' = (u + v) mod Q, diff = (v - u) mod Q
-    wire [12:0] sum_uv_raw = {1'b0, u} + {1'b0, v};
+    // Stage 0: register all inputs so the BRAM read-data / bank-mux path ends at
+    // a flop instead of running through the v-u compare into the DSP A port.
+    reg        en_r;
+    reg [1:0]  mode_r;
+    reg [11:0] u_r, v_r, zeta_r;
+    always @(posedge clk) begin
+        if (rst) begin
+            en_r   <= 1'b0;
+            mode_r <= 2'd0;
+            u_r    <= 12'd0;
+            v_r    <= 12'd0;
+            zeta_r <= 12'd0;
+        end else begin
+            en_r   <= en;
+            mode_r <= mode;
+            u_r    <= u;
+            v_r    <= v;
+            zeta_r <= zeta;
+        end
+    end
+
+    wire [12:0] sum_uv_raw = {1'b0, u_r} + {1'b0, v_r};
     wire [11:0] sum_uv     = (sum_uv_raw >= {1'b0, Q}) ? (sum_uv_raw[11:0] - Q) : sum_uv_raw[11:0];
 
-    wire [11:0] diff_vu    = (v >= u) ? (v - u) : (v + Q - u);
+    wire [11:0] diff_vu    = (v_r >= u_r) ? (v_r - u_r) : (v_r + Q - u_r);
 
     // Multiplex modmul inputs based on mode:
     //   MODE_CT:  modmul(v, zeta)
@@ -63,11 +84,11 @@ module butterfly #(
     //   MODE_MUL: modmul(u, zeta)
     reg [11:0] mul_op_a;
     always @(*) begin
-        case (mode)
-            MODE_CT:  mul_op_a = v;
+        case (mode_r)
+            MODE_CT:  mul_op_a = v_r;
             MODE_GS:  mul_op_a = diff_vu;
-            MODE_MUL: mul_op_a = u;
-            default:  mul_op_a = u;
+            MODE_MUL: mul_op_a = u_r;
+            default:  mul_op_a = u_r;
         endcase
     end
 
@@ -82,9 +103,9 @@ module butterfly #(
     ) u_modmul (
         .clk       (clk),
         .rst       (rst),
-        .en        (en),
+        .en        (en_r),
         .a         (mul_op_a),
-        .b         (zeta),
+        .b         (zeta_r),
         .valid_out (mul_valid),
         .res       (mul_res)
     );
@@ -105,9 +126,9 @@ module butterfly #(
                 mode_pipe[i]   <= 2'd0;
             end
         end else begin
-            u_pipe[0]      <= u;
+            u_pipe[0]      <= u_r;
             gs_sum_pipe[0] <= sum_uv;
-            mode_pipe[0]   <= mode;
+            mode_pipe[0]   <= mode_r;
             for (i = 1; i < PIPE_DEPTH; i = i + 1) begin
                 u_pipe[i]      <= u_pipe[i-1];
                 gs_sum_pipe[i] <= gs_sum_pipe[i-1];

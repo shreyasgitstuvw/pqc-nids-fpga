@@ -178,7 +178,7 @@ module ntt_core #(
     wire [11:0] bf_op_v = (stage_is_even) ? mem_b_rdata : scratch_b_rdata;
 
     // -------------------------------------------------------------------------
-    // Butterfly Unit Instance (PIPE_DEPTH = 3, Latency = 4 cycles)
+    // Butterfly Unit Instance (PIPE_DEPTH = 3, Latency = 5 cycles)
     // -------------------------------------------------------------------------
     wire        bf_out_val;
     wire [11:0] bf_out_u;
@@ -200,17 +200,17 @@ module ntt_core #(
     );
 
     // -------------------------------------------------------------------------
-    // Butterfly Output Write Address Pipeline (4 cycles matching butterfly)
+    // Butterfly Output Write Address Pipeline (5 cycles matching butterfly)
     // -------------------------------------------------------------------------
-    reg [7:0] wr_addr_a_pipe [0:3];
-    reg [7:0] wr_addr_b_pipe [0:3];
-    reg       wr_stage_even_pipe [0:3];
-    reg       wr_is_scale_pipe [0:3];
+    reg [7:0] wr_addr_a_pipe [0:4];
+    reg [7:0] wr_addr_b_pipe [0:4];
+    reg       wr_stage_even_pipe [0:4];
+    reg       wr_is_scale_pipe [0:4];
 
     integer p;
     always @(posedge clk) begin
         if (rst) begin
-            for (p = 0; p < 4; p = p + 1) begin
+            for (p = 0; p < 5; p = p + 1) begin
                 wr_addr_a_pipe[p]     <= 8'd0;
                 wr_addr_b_pipe[p]     <= 8'd0;
                 wr_stage_even_pipe[p] <= 1'b0;
@@ -221,7 +221,7 @@ module ntt_core #(
             wr_addr_b_pipe[0]     <= bf_in_addr_b;
             wr_stage_even_pipe[0] <= stage_is_even;
             wr_is_scale_pipe[0]   <= (state == S_INTT_SCALE);
-            for (p = 1; p < 4; p = p + 1) begin
+            for (p = 1; p < 5; p = p + 1) begin
                 wr_addr_a_pipe[p]     <= wr_addr_a_pipe[p-1];
                 wr_addr_b_pipe[p]     <= wr_addr_b_pipe[p-1];
                 wr_stage_even_pipe[p] <= wr_stage_even_pipe[p-1];
@@ -230,10 +230,10 @@ module ntt_core #(
         end
     end
 
-    wire [7:0] active_wr_addr_a    = wr_addr_a_pipe[3];
-    wire [7:0] active_wr_addr_b    = wr_addr_b_pipe[3];
-    wire       active_dest_scratch = wr_stage_even_pipe[3] && !wr_is_scale_pipe[3];
-    wire       active_is_scale     = wr_is_scale_pipe[3];
+    wire [7:0] active_wr_addr_a    = wr_addr_a_pipe[4];
+    wire [7:0] active_wr_addr_b    = wr_addr_b_pipe[4];
+    wire       active_dest_scratch = wr_stage_even_pipe[4] && !wr_is_scale_pipe[4];
+    wire       active_is_scale     = wr_is_scale_pipe[4];
 
     // Counter for retired butterflies in stage
     reg [6:0] retired_bf_cnt;
