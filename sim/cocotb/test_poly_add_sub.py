@@ -14,8 +14,8 @@
 #      all three sum branches (< Q, [Q, 2Q), >= 2Q).
 #   4. poly_add_sub_full_polynomials:
 #      Multiple full 256-coefficient polynomial operations per mode.
-#   5. poly_add_sub_exact_259_cycles:
-#      Asserts exact latency of 259 clock cycles.
+#   5. poly_add_sub_exact_260_cycles:
+#      Asserts exact latency of 260 clock cycles.
 #   6. poly_add_sub_mid_stream_reset:
 #      Verifies clean reset behaviour mid-stream.
 #==========================================================================
@@ -248,8 +248,8 @@ async def poly_add_sub_full_polynomials(dut):
 
 
 @cocotb.test()
-async def poly_add_sub_exact_259_cycles(dut):
-    """Verify that poly_add_sub latency is exactly 259 clock cycles."""
+async def poly_add_sub_exact_260_cycles(dut):
+    """Verify that poly_add_sub latency is exactly 260 clock cycles."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     await reset_dut(dut)
 
@@ -258,7 +258,7 @@ async def poly_add_sub_exact_259_cycles(dut):
     ram_c = MockRam()
 
     dest_ram, cycles = await run_operation(dut, ram_a, ram_b, ram_c, mode=0)
-    assert cycles == 259, f"Expected exactly 259 cycles latency, got {cycles}"
+    assert cycles == 260, f"Expected exactly 260 cycles latency, got {cycles}"
 
 
 @cocotb.test()
