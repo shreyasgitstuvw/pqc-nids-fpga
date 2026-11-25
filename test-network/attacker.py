@@ -86,7 +86,7 @@ def crc(ser, n=5):
 def truncated(ser):
     print("[TX] FRAME_TIMEOUT: a length prefix promising 400 bytes, then silence")
     body = wire.eth_ip_udp(b"q" * 64, wire.PORT_DATA, src_ip=A_IP, src_mac=A_MAC)
-    ser.write((400).to_bytes(2, "big") + body[:40])
+    ser.write((400).to_bytes(2, "big") + body[:100])
     ser.flush()
     # deframer.v times out after 50,000 cycles, which is 500 us at 100 MHz.
     time.sleep(0.05)
