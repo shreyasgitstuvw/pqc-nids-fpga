@@ -76,7 +76,10 @@ module pqc_nids_top #(
     input  wire       uart_rx_pin,  // JA Pmod USB-UART, data from the sender
     output wire       uart_tx_pin,  // JA Pmod USB-UART, handshake reply to the sender
     input  wire       attacker_rx_pin, // JB Pmod USB-UART, data from the attacker
-    output wire       telem_tx_pin, // JC Pmod USB-UART, telemetry to the monitor
+    output wire       telem_tx_pin, // JC Pmod USB-UART, telemetry to the monitor (optional)
+    output wire       attacker_tx_pin, // JB Pmod USB-UART, handshake reply to the attacker
+    input  wire       peer_rx_pin,  // JD Pmod USB-UART, data from peer B
+    output wire       peer_tx_pin,  // JD Pmod USB-UART, handshake reply + relayed data to peer B
     output wire [7:0] led           // LD0..LD7
 );
 
@@ -104,6 +107,8 @@ module pqc_nids_top #(
     wire [7:0] rx_data, rxb_data;
     wire       rx_valid, rx_busy, rx_frame_err;
     wire       rxb_valid, rxb_busy, rxb_frame_err;
+    wire [7:0] rxp_data;
+    wire       rxp_valid, rxp_busy, rxp_frame_err;
 
     uart_rx #(.CLK_FREQ(CLK_HZ), .BAUD_RATE(BAUD_RATE)) u_uart_rx (
         .clk(clk), .rst(rst_i), .rx_pin(uart_rx_pin),
@@ -117,19 +122,33 @@ module pqc_nids_top #(
         .frame_err(rxb_frame_err)
     );
 
-    // Merge the two links into the one byte stream deframer.v expects.
+    uart_rx #(.CLK_FREQ(CLK_HZ), .BAUD_RATE(BAUD_RATE)) u_uart_rx_p (
+        .clk(clk), .rst(rst_i), .rx_pin(peer_rx_pin),
+        .rx_data(rxp_data), .rx_valid(rxp_valid), .rx_busy(rxp_busy),
+        .frame_err(rxp_frame_err)
+    );
+
+    // Merge the three links into the one byte stream deframer.v expects.
     wire       arb_valid;
     wire [7:0] arb_data;
-    wire [15:0] arb_drop_a, arb_drop_b, arb_fwd_a, arb_fwd_b;
+    wire [15:0] arb_drop_a, arb_drop_b, arb_drop_c, arb_fwd_a, arb_fwd_b, arb_fwd_c;
     wire       arb_drop_sticky;
+    // IDENTITY. arb_src names the physical link the frame now in the pipeline arrived
+    // on, held for that whole frame: 0 = JA (peer A), 1 = JB (attacker), 2 = JD (peer B).
+    // Every identity decision below uses THIS, never an address out of the packet, so a
+    // sender cannot choose who it is. session_lookup.v explains why and what it does not
+    // cover (a dedicated link per peer; not a shared or routed network).
+    wire [1:0] arb_src;
 
-    rx_arbiter #(.CLK_HZ(CLK_HZ), .BAUD_RATE(BAUD_RATE)) u_rx_arb (
+    rx_arbiter3 #(.CLK_HZ(CLK_HZ), .BAUD_RATE(BAUD_RATE)) u_rx_arb (
         .clk(clk), .rst(rst_i),
         .a_valid(rx_valid),  .a_data(rx_data),
         .b_valid(rxb_valid), .b_data(rxb_data),
-        .out_valid(arb_valid), .out_data(arb_data),
-        .drop_a(arb_drop_a), .drop_b(arb_drop_b),
-        .fwd_a(arb_fwd_a), .fwd_b(arb_fwd_b), .drop_sticky(arb_drop_sticky)
+        .c_valid(rxp_valid), .c_data(rxp_data),
+        .out_valid(arb_valid), .out_data(arb_data), .out_src(arb_src),
+        .drop_a(arb_drop_a), .drop_b(arb_drop_b), .drop_c(arb_drop_c),
+        .fwd_a(arb_fwd_a), .fwd_b(arb_fwd_b), .fwd_c(arb_fwd_c),
+        .drop_sticky(arb_drop_sticky)
     );
 
     wire       df_valid, df_sof, df_eof;
@@ -173,12 +192,15 @@ module pqc_nids_top #(
 
     // -------------------------------------------------------- session table
     wire [15:0] session_id;
+    wire [15:0] session_id_now;      // combinational: this packet's session, in the hdr_valid cycle
     wire        sid_valid, sid_hit, sid_allocated, sid_evicted;
 
     session_lookup u_lookup (
         .clk(clk), .rst(rst_i),
-        .hdr_valid(hdr_valid), .ip_src_addr(ip_src_addr), .packet_type(packet_type),
-        .session_id(session_id), .sid_valid(sid_valid), .sid_hit(sid_hit),
+        .hdr_valid(hdr_valid), .ip_src_addr(ip_src_addr), .src_link(arb_src),
+        .packet_type(packet_type),
+        .session_id(session_id), .session_id_now(session_id_now),
+        .sid_valid(sid_valid), .sid_hit(sid_hit),
         .sid_allocated(sid_allocated), .sid_evicted(sid_evicted),
         .clear_req(1'b0), .clear_id(16'd0)
     );
@@ -207,11 +229,14 @@ module pqc_nids_top #(
 
     // Any session up, for LD0. Set when a key is stored, cleared on a
     // structural rejection; this is display state, not a security decision.
+    // Set only when a PEER's handshake completes (an HS_INIT was answered), not
+    // by the automatic boot-time KeyGen, so LD0 means "a secure line exists".
     reg any_session_up;
+    wire hs_complete_ev;     // defined below, with pending_encaps
     always @(posedge clk) begin
         if (rst_i)                 any_session_up <= 1'b0;
         else if (kem_key_invalid)  any_session_up <= 1'b0;
-        else if (kem_done)         any_session_up <= 1'b1;
+        else if (hs_complete_ev)   any_session_up <= 1'b1;
     end
 
     // ---------------------------------------------------------- ML-KEM lane
@@ -220,7 +245,7 @@ module pqc_nids_top #(
 
     entropy_src u_entropy (
         .clk(clk), .rst(rst_i),
-        .jitter_strobe(rx_valid | rxb_valid),   // raw arrival times of both links
+        .jitter_strobe(rx_valid | rxb_valid | rxp_valid),   // raw arrival times of all links
         .seed_load(1'b0), .seed_in(256'd0),
         .rng_valid(rng_valid), .rng_data(rng_data), .rng_take(rng_take)
     );
@@ -278,6 +303,7 @@ module pqc_nids_top #(
     reg        hs_send_req;
     reg [47:0] hs_eth_src, hs_eth_dst;
     reg [31:0] hs_ip_src, hs_ip_dst;
+    reg [1:0]  hs_link;        // link the HS_INIT arrived on = the joiner's identity
     always @(posedge clk) begin
         if (rst_i) begin
             pending_encaps <= 1'b0;
@@ -290,6 +316,7 @@ module pqc_nids_top #(
                 hs_eth_dst     <= eth_dst_mac;
                 hs_ip_src      <= ip_src_addr;
                 hs_ip_dst      <= ip_dst_addr;
+                hs_link        <= arb_src;
             end else if (kem_key_invalid) begin
                 pending_encaps <= 1'b0;      // structural failure: nothing to send
             end else if (kem_done && pending_encaps) begin
@@ -298,6 +325,8 @@ module pqc_nids_top #(
             end
         end
     end
+
+    assign hs_complete_ev = kem_done && pending_encaps && !kem_key_invalid;
 
     // ------------------------------------------------------------ AEAD lane
     wire         fr_key_valid, fr_ct_valid, fr_ct_sof, fr_ct_eof;
@@ -321,7 +350,7 @@ module pqc_nids_top #(
     aead_framer u_framer (
         .clk(clk), .rst(rst_i),
         .hdr_valid(hdr_valid), .packet_type(packet_type),
-        .payload_len(payload_len), .session_id(session_id),
+        .payload_len(payload_len), .session_id(session_id_now),
         .ip_src_addr(ip_src_addr), .ip_dst_addr(ip_dst_addr),
         .l4_src_port(l4_src_port), .l4_dst_port(l4_dst_port),
         .pb_valid(pb_valid), .pb_sof(pb_sof), .pb_eof(pb_eof), .pb_data(pb_data),
@@ -464,7 +493,7 @@ module pqc_nids_top #(
     wire [7:0] hs_tx_data, tel_tx_data;
     wire       hs_tx_valid, tel_tx_valid, hs_busy;
     wire       tx_busy;
-    wire       tx_done_unused;
+    wire       tx_done_unused, tx_done_b_unused, tx_done_c_unused;
     wire       tel_tx_busy, tel_tx_done_unused;
 
     handshake_tx u_hs_tx (
@@ -490,10 +519,63 @@ module pqc_nids_top #(
         .tx_data(tel_tx_data), .tx_valid(tel_tx_valid), .tx_busy(tel_tx_busy)
     );
 
-    uart_tx #(.CLK_FREQ(CLK_HZ), .BAUD_RATE(BAUD_RATE)) u_uart_tx (
+    // ---------------------------------------------------------- relay lane
+    // Decrypt -> assess -> re-encrypt for the destination peer (msg_relay.v).
+    // The reply goes back out the link the HS_INIT came in on, and the egress key is
+    // stored in that link's slot. 0 = JA (A), 1 = JB (attacker), 2 = JD (B).
+    reg  [1:0]  hs_dsel;                       // transmitter the handshake reply uses
+    always @(posedge clk) begin
+        if (rst_i)            hs_dsel <= 2'd0;
+        else if (hs_send_req) hs_dsel <= (hs_link == 2'd0) ? 2'd0 :   // A  -> JA
+                                         (hs_link == 2'd2) ? 2'd1 :   // B  -> JD
+                                                             2'd2;    // C  -> JB
+    end
+
+    wire        eg_active, eg_valid;
+    wire [7:0]  eg_data;
+    wire [1:0]  eg_dest;
+    wire        busy_a, busy_b, busy_c;
+    wire [15:0] rl_relayed, rl_nopeer, rl_busy, rl_toolong;
+    wire [2:0]  rl_qlevel;
+
+    msg_relay u_relay (
         .clk(clk), .rst(rst_i),
-        .tx_data(hs_tx_data), .tx_valid(hs_tx_valid),
-        .tx_pin(uart_tx_pin), .tx_busy(tx_busy), .tx_done(tx_done_unused)
+        .pt_valid(pt_valid), .pt_data(pt_data), .pt_sof(pt_sof), .src_link(arb_src),
+        .drop_valid(drop_valid), .drop_fail(drop_fail),
+        .key_load(hs_complete_ev), .key_slot(hs_link), .key_data(kem_shared_secret),
+        .hs_hold_off(hs_busy | hs_send_req | pending_encaps),
+        .tx_busy(eg_dest[0] ? busy_b : busy_a),
+        .eg_active(eg_active), .tx_valid(eg_valid), .tx_data(eg_data), .eg_dest(eg_dest),
+        .cnt_relayed(rl_relayed), .cnt_nopeer(rl_nopeer),
+        .cnt_full(rl_busy), .cnt_toolong(rl_toolong), .q_level(rl_qlevel)
+    );
+
+    // handshake_tx stalls while its UART is busy OR the relay owns the line.
+    assign tx_busy = eg_active |
+                     ((hs_dsel == 2'd0) ? busy_a : (hs_dsel == 2'd1) ? busy_b : busy_c);
+
+    wire eg_to_a = eg_active && (eg_dest == 2'd0);
+    wire eg_to_b = eg_active && (eg_dest == 2'd1);
+    wire [7:0] tx_a_data  = eg_to_a ? eg_data  : hs_tx_data;
+    wire       tx_a_valid = eg_to_a ? eg_valid : (hs_tx_valid && hs_dsel == 2'd0 && !eg_active);
+    wire [7:0] tx_b_data  = eg_to_b ? eg_data  : hs_tx_data;
+    wire       tx_b_valid = eg_to_b ? eg_valid : (hs_tx_valid && hs_dsel == 2'd1 && !eg_active);
+    wire       tx_c_valid = hs_tx_valid && hs_dsel == 2'd2 && !eg_active;
+
+    uart_tx #(.CLK_FREQ(CLK_HZ), .BAUD_RATE(BAUD_RATE)) u_uart_tx (          // JA: peer A
+        .clk(clk), .rst(rst_i),
+        .tx_data(tx_a_data), .tx_valid(tx_a_valid),
+        .tx_pin(uart_tx_pin), .tx_busy(busy_a), .tx_done(tx_done_unused)
+    );
+    uart_tx #(.CLK_FREQ(CLK_HZ), .BAUD_RATE(BAUD_RATE)) u_uart_tx_b (        // JD: peer B
+        .clk(clk), .rst(rst_i),
+        .tx_data(tx_b_data), .tx_valid(tx_b_valid),
+        .tx_pin(peer_tx_pin), .tx_busy(busy_b), .tx_done(tx_done_b_unused)
+    );
+    uart_tx #(.CLK_FREQ(CLK_HZ), .BAUD_RATE(BAUD_RATE)) u_uart_tx_c (        // JB: attacker
+        .clk(clk), .rst(rst_i),
+        .tx_data(hs_tx_data), .tx_valid(tx_c_valid),
+        .tx_pin(attacker_tx_pin), .tx_busy(busy_c), .tx_done(tx_done_c_unused)
     );
 
     uart_tx #(.CLK_FREQ(CLK_HZ), .BAUD_RATE(BAUD_RATE)) u_uart_tx_tel (
@@ -510,6 +592,8 @@ module pqc_nids_top #(
                         dk_ram_rdata, kem_pkt_dropped_busy, fr_no_session_drop,
                         payload_len, tx_done_unused, tel_tx_done_unused,
                         rxb_busy, rxb_frame_err, arb_drop_a, arb_drop_b,
-                        arb_fwd_a, arb_fwd_b, hs_busy};
+                        arb_fwd_a, arb_fwd_b, arb_drop_c, arb_fwd_c, hs_busy,
+                        rxp_busy, rxp_frame_err, tx_done_b_unused, tx_done_c_unused,
+                        rl_relayed, rl_nopeer, rl_busy, rl_toolong, rl_qlevel};
 
 endmodule

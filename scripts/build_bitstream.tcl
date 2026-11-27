@@ -40,6 +40,7 @@ set rtl_dirs {
     rtl/control
     rtl/detect
     rtl/io
+    rtl/relay
     rtl/crypto/chacha_poly
     rtl/crypto/kem
     rtl/crypto/ntt

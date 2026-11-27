@@ -25,7 +25,7 @@
 // needs a block design rather than pure RTL, which is why it is not here. The
 // load port (seed_load / seed_in) exists so that swap is a wiring change.
 //
-// PROTOCOL: rng_valid is held high whenever a seed is available. mlkem_top
+// PROTOCOL: rng_valid is high whenever a seed is available and pulses low after a take. mlkem_top
 // pulses rng_take for one cycle when it consumes one; this module then advances
 // its state, so no two encapsulations ever see the same word. rng_valid stays
 // high because the next word is ready immediately.
@@ -73,7 +73,18 @@ module entropy_src #(
     wire [255:0] lfsr_next = {1'b0, state[255:1]} ^ (feedback ? TAPS : 256'd0);
 
     // A seed is always available: the next word is ready the cycle after a take.
-    assign rng_valid = 1'b1;
+    // rng_valid DROPS for a few cycles after every take. mlkem_top's rng_lock is
+    // cleared only when it sees rng_valid low; with rng_valid tied high, the lock
+    // set by the first Encaps was never released and every later HS_INIT hung in
+    // the ML-KEM core (one handshake per power-up). The word is already advanced
+    // by rng_take, so the pause only gives the lock its release edge.
+    reg [1:0] take_hold;
+    always @(posedge clk) begin
+        if (rst)              take_hold <= 2'd0;
+        else if (rng_take)    take_hold <= 2'd3;
+        else if (take_hold != 2'd0) take_hold <= take_hold - 2'd1;
+    end
+    assign rng_valid = (take_hold == 2'd0) && !rng_take;
     assign rng_data  = state;
 
     always @(posedge clk) begin

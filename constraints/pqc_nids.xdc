@@ -86,3 +86,17 @@ set_property -dict {PACKAGE_PIN W11 IOSTANDARD LVCMOS33} [get_ports attacker_rx_
 set_property -dict {PACKAGE_PIN Y4  IOSTANDARD LVCMOS33} [get_ports telem_tx_pin]
 set_false_path -from [get_ports attacker_rx_pin]
 set_false_path -to   [get_ports telem_tx_pin]
+
+#------------------------------------------------ relay build: B on JD, attacker TX on JB
+# Pmod USB-UART convention as above (module TXD = Pmod pin 2 -> FPGA input; module
+# RXD = Pmod pin 3 <- FPGA output). Pins from Digilent Zedboard-Master.xdc names:
+#   JB3   = V10  : attacker_tx_pin (handshake reply to the attacker)
+#   JD1_N = W7   : peer_rx_pin     (JD Pmod pin 2, data from peer B)
+#   JD2_P = V5   : peer_tx_pin     (JD Pmod pin 3, reply + relayed data to peer B)
+# *** VERIFY V10, W7, V5 against your Zedboard-Master.xdc before the build. ***
+set_property -dict {PACKAGE_PIN V10 IOSTANDARD LVCMOS33} [get_ports attacker_tx_pin]
+set_property -dict {PACKAGE_PIN W7  IOSTANDARD LVCMOS33} [get_ports peer_rx_pin]
+set_property -dict {PACKAGE_PIN V5  IOSTANDARD LVCMOS33} [get_ports peer_tx_pin]
+set_false_path -from [get_ports peer_rx_pin]
+set_false_path -to   [get_ports attacker_tx_pin]
+set_false_path -to   [get_ports peer_tx_pin]

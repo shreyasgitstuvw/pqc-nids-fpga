@@ -165,6 +165,7 @@ def find_frame(stream: bytes, want_len: int):
 async def reset_and_keygen(dut, cap):
     dut.uart_rx_pin.value = 1
     dut.attacker_rx_pin.value = 1
+    dut.peer_rx_pin.value = 1
     dut.btn_rst.value = 1
     for _ in range(20):
         await RisingEdge(dut.clk)
@@ -322,7 +323,7 @@ def test_runner(sim_build):
     from cocotb.runner import get_runner
 
     proj = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    dirs = ["rtl/ingress", "rtl/control", "rtl/detect", "rtl/io",
+    dirs = ["rtl/ingress", "rtl/control", "rtl/detect", "rtl/io", "rtl/relay",
             "rtl/crypto/chacha_poly", "rtl/crypto/kem", "rtl/crypto/ntt",
             "rtl/crypto/sha3", "rtl/top"]
     sources = []

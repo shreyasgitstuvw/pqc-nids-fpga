@@ -49,3 +49,11 @@ sim/sim_build_*/
 scratch/
 Claude outputs/
 scripts/preflight.local.py
+
+# --- local build output ---
+build/
+build_golden_tier1/
+build_link_identity/
+build_log*.txt
+clockInfo.txt
+tight_setup_hold_pins.txt

@@ -13,16 +13,28 @@
 //   reach ESTABLISHED, no key was ever stored, no data packet could be decrypted,
 //   and cam_matcher.v never saw a plaintext byte. This module closes that gap.
 //
-// KEY CHOICE
-//   The table is keyed on ip_src_addr alone, not the full 5-tuple. A peer's
-//   source port changes from packet to packet, so including it would make every
-//   packet a miss. The source address is what identifies the peer across its
-//   handshake and its subsequent data packets.
+// KEY CHOICE: THE PHYSICAL LINK, NOT THE CLAIMED ADDRESS
+//   The table is keyed on src_link, the Pmod link the frame arrived on.
 //
-//   An attacker who spoofs a victim's source address maps onto the victim's slot.
-//   That is not a hole: it buys them nothing, because the session key is the
-//   ML-KEM shared secret and they cannot produce a Poly1305 tag that verifies
-//   under it. Such a packet fails with RC_BAD_TAG, which is the correct verdict.
+//   It used to be keyed on ip_src_addr, and the old note here argued that an
+//   attacker spoofing a victim's address "buys them nothing", because it cannot
+//   forge a Poly1305 tag under the victim's key. The tag argument is sound but the
+//   conclusion was too strong: mapping onto the victim's slot lets the attacker
+//   touch state that belongs to the victim. An HS_INIT carrying the victim's
+//   address claims the victim's slot and overwrites its key, and a DATA packet
+//   carrying it advances the victim's nonce. Neither reads the victim's traffic;
+//   both break the victim's session. That is a denial of service, not nothing.
+//
+//   Nothing written inside a packet can change which cable carried it, so the link
+//   is the one field a sender does not control. Keying on it makes the spoof
+//   structurally impossible instead of merely detected: a frame on the attacker's
+//   link resolves to the attacker's own slot and own key whatever address it
+//   claims, so it fails RC_BAD_TAG and leaves every other session untouched.
+//
+//   This holds only because each peer here has a dedicated point-to-point link. It
+//   does NOT generalise to a shared or routed network, where the arrival port
+//   identifies nothing; there the answer is cryptographic mutual authentication
+//   (ML-DSA). State that limit rather than claiming spoofing is solved in general.
 //
 // ALLOCATION POLICY
 //   SLOTS = 3, giving ids 1..3. session_mgr.v reserves id 0 and ignores ids >= 4,
@@ -60,11 +72,13 @@ module session_lookup (
 
     // ---- from parser.v (packet bus header context) ----
     input  wire        hdr_valid,       // 1-cycle strobe: headers parsed
-    input  wire [31:0] ip_src_addr,     // peer address = table key
+    input  wire [31:0] ip_src_addr,     // claimed peer address: DATA, never identity
+    input  wire [1:0]  src_link,        // physical link the frame arrived on = identity
     input  wire [1:0]  packet_type,     // 2'b00 HS_INIT, 2'b01 DATA, 2'b10 HS_RESP
 
     // ---- resolved session id (packet-bus field) ----
     output reg  [15:0] session_id,      // 1..3 on a hit/allocation, 0 = unassigned
+    output wire [15:0] session_id_now,  // same answer, combinational: valid IN the hdr_valid cycle
     output reg         sid_valid,       // 1-cycle strobe: session_id updated
     output reg         sid_hit,         // 1 = resolved to an existing session
     output reg         sid_allocated,   // 1 = a handshake claimed a new slot
@@ -85,9 +99,11 @@ module session_lookup (
     reg [1:0]  victim;              // round-robin eviction pointer, 0..2
 
     // ---- combinational match against all three slots ----
-    wire hit0 = occupied[0] && (key[0] == ip_src_addr);
-    wire hit1 = occupied[1] && (key[1] == ip_src_addr);
-    wire hit2 = occupied[2] && (key[2] == ip_src_addr);
+    wire [31:0] ident = {30'd0, src_link};
+
+    wire hit0 = occupied[0] && (key[0] == ident);
+    wire hit1 = occupied[1] && (key[1] == ident);
+    wire hit2 = occupied[2] && (key[2] == ident);
     wire       any_hit  = hit0 | hit1 | hit2;
     wire [1:0] hit_slot = hit0 ? 2'd0 : (hit1 ? 2'd1 : 2'd2);
 
@@ -104,6 +120,19 @@ module session_lookup (
     // Teardown decode (clear_id 1..3 -> slot 0..2)
     wire        clear_ok   = clear_req && (clear_id >= 16'd1) && (clear_id <= 16'd3);
     wire [1:0]  clear_slot = clear_id[1:0] - 2'd1;
+
+    // The registered session_id above lands one cycle AFTER hdr_valid. A consumer
+    // that samples it in the hdr_valid cycle (aead_framer) therefore sees the
+    // PREVIOUS packet's session. That is invisible with one peer (the previous
+    // packet always belonged to the same session) and wrong with several: A's data
+    // was decrypted under whichever peer happened to speak last, or rejected as
+    // "no session" after an unrelated packet. session_id_now is the answer for THIS
+    // packet, available in the same cycle.
+    assign session_id_now = is_handshake           ? ({14'd0, claim_slot} + 16'd1)
+                          : (is_data && any_hit)   ? ({14'd0, hit_slot}   + 16'd1)
+                          :                          16'd0;
+
+    wire _unused_ip = &{1'b0, ip_src_addr};
 
     integer i;
 
@@ -137,7 +166,7 @@ module session_lookup (
                 sid_valid <= 1'b1;
 
                 if (is_handshake) begin
-                    key[claim_slot]      <= ip_src_addr;
+                    key[claim_slot]      <= ident;
                     occupied[claim_slot] <= 1'b1;
                     session_id           <= {14'd0, claim_slot} + 16'd1;
                     sid_hit              <= any_hit;
